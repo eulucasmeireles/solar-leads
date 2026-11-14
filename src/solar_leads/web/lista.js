@@ -333,7 +333,7 @@ async function montarLista(raiz, meta, abaInicial, qs) {
   const resultado = h('p', { class: 'resultado', 'aria-live': 'polite' });
   const md = criarMestreDetalhe({
     url: (pagina) => `/api/listas/${idUrl}/contatos?${queryDosFiltros(L.f, { ordem: L.ordem, pagina, por_pagina: 50 })}`,
-    perfil: { aoAdicionarPasta: (l) => abrirAdicionar({ telefones: [l.telefone] }) },
+    perfil: { aoAdicionarPasta: (l, ctx) => { if (ctx && ctx.fechar) ctx.fechar(); abrirAdicionar({ telefones: [l.telefone] }); } },
     vazio: () => estadoVazio('Nenhum contato com esses filtros', 'Afrouxe algum filtro para ver mais contatos.', h('button', { class: 'btn btn-sec', type: 'button', onclick: limparTudo }, 'Limpar filtros')),
     aoMudar: () => { desenharNumeros(); atualizarExportar(); },
     aoCarregar: (res) => { resultado.textContent = res.total ? `${num(res.total)} contatos` : ''; },
@@ -630,7 +630,7 @@ function perfilContato(l, opc, ctx) {
   const linhaPastas = (ps.length || opc.aoAdicionarPasta) ? h('div', { class: 'pf-pastas' },
     h('span', { class: 'pf-pastas-t' }, icone('pasta', 16), 'Pastas'),
     h('div', { class: 'chips' }, ps.length ? ps.map((p) => h('a', { class: 'chip chip-pasta', href: `#/pasta/${encodeURIComponent(p.id)}` }, h('span', { class: 'chip-tx', text: p.nome }))) : h('span', { class: 'apoio-peq', text: 'Em nenhuma pasta' })),
-    opc.aoAdicionarPasta ? h('button', { class: 'link-btn', type: 'button', onclick: () => opc.aoAdicionarPasta(l) }, 'Adicionar a uma pasta') : null) : null;
+    opc.aoAdicionarPasta ? h('button', { class: 'link-btn', type: 'button', onclick: () => opc.aoAdicionarPasta(l, ctx) }, 'Adicionar a uma pasta') : null) : null;
   const el = h('div', { class: 'perfil' },
     h('header', { class: 'pf-cab' }, avatar(l, true),
       h('div', {}, h('h2', { text: nome || 'Contato sem nome' }), linhaWhats(l), h('p', { class: 'apoio', text: [l.qualificacao_dono, l.empresa || l.razao_social].filter(Boolean).join(' · ') }),

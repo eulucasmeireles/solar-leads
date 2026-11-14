@@ -14,7 +14,7 @@ from . import aneel, cnpj_db
 from .qualificacao import (
     LIMITE_CONTADOR, QUALIF_DONO, aptidao_solar, oportunidade, pontuar_contato, potencial_da_pessoa,
 )
-from .telefone import e164, e_celular
+from .telefone import e164, e_celular, suspeito
 
 _SUFIXOS = re.compile(r"\b(LTDA|ME|EPP|EIRELI|S\s?A|MEI|CIA|COMERCIO|COMERCIAL|E|DE|DA|DO|DAS|DOS)\b")
 _NAO_ALFANUM = re.compile(r"[^A-Z0-9]+")
@@ -473,6 +473,8 @@ def enriquecer(
         for do_socio in por_socio:
             for t in do_socio:
                 cands.setdefault(t, {})["dono"] = True
+        # Números de enfeite (99999-9999, 12345678) não são de ninguém.
+        cands = {t: o for t, o in cands.items() if not suspeito(t)}
         if ddds:
             # Só telefones da região: número de outro DDD costuma ser de sócio ou diretor que mora fora.
             cands = {t: o for t, o in cands.items() if t[:2] in ddds}

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import re
+from functools import lru_cache
 import tempfile
 from pathlib import Path
 
@@ -86,6 +87,7 @@ INTEIRAS = ("ordem", "aptidao_solar", "chance_dono", "potencial_casa", "potencia
 PORTE = {"01": "Microempresa", "03": "Pequeno porte", "05": "Médio ou grande"}
 
 
+@lru_cache(maxsize=4096)
 def slug(texto: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", enriquecer.norm(texto).lower()).strip("-")
 

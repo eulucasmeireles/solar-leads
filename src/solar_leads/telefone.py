@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 import phonenumbers
 from phonenumbers import PhoneNumberType
@@ -39,9 +40,30 @@ def normalizar(valor: str | None, ddd: str | None = None) -> str | None:
     return num
 
 
+@lru_cache(maxsize=None)
+def _ddd_tem_celular(ddd: str) -> bool:
+    """Se o DDD existe para celular, pela mesma biblioteca; calculado uma vez por DDD."""
+    return _e_celular_pela_biblioteca(ddd + "991234567")
+
+
 def e_celular(nacional: str | None) -> bool:
     if not nacional:
         return False
+    # Caso de quase todo celular: 11 dígitos com 9 depois do DDD. Resolver aqui evita uma
+    # consulta lenta à biblioteca para cada um dos milhares de números de uma lista.
+    if len(nacional) == 11 and nacional[2] == "9" and nacional.isdigit():
+        return _ddd_tem_celular(nacional[:2])
+    return _e_celular_pela_biblioteca(nacional)
+
+
+def suspeito(nacional: str | None) -> bool:
+    """Número de enfeite no cadastro: os oito últimos dígitos usam um ou dois algarismos só, ou são uma sequência."""
+    fim = (nacional or "")[-8:]
+    return len(fim) == 8 and (len(set(fim)) <= 2 or fim in "0123456789" or fim in "9876543210")
+
+
+@lru_cache(maxsize=200_000)
+def _e_celular_pela_biblioteca(nacional: str) -> bool:
     try:
         parsed = phonenumbers.parse("+55" + nacional, None)
     except phonenumbers.NumberParseException:

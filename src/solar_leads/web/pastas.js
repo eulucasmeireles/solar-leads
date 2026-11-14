@@ -29,7 +29,7 @@ function folhaNomePasta({ titulo, nome, rotulo, aoSalvar }) {
 function folhaAdicionarPasta({ listaId, total: totalFiltro, totalComWhats, telefones, queryFiltros, aoConcluir }) {
   const unico = Array.isArray(telefones) && telefones.length > 0;
   const idT = uid('folha');
-  const S = { pastas: [], escolha: null, nome: '', qtd: 0, pular: true, soWhats: !unico && (totalComWhats || 0) > 0, carregou: false, criada: null };
+  const S = { pastas: [], escolha: null, nome: '', qtd: 0, pular: true, soWhats: !unico && (totalComWhats || 0) > 0, carregou: false, criada: null, base: '', tam: 100, n: 3 };
   const totalAtual = () => (S.soWhats ? (totalComWhats == null ? totalFiltro : totalComWhats) : totalFiltro) || 0;
   const maxAtual = () => Math.max(100, Math.ceil(totalAtual() / 100) * 100);
   S.qtd = totalAtual() > 100 ? 100 : 0;
@@ -38,6 +38,20 @@ function folhaAdicionarPasta({ listaId, total: totalFiltro, totalComWhats, telef
   const campoNome = h('input', { type: 'text', maxlength: '80', autocomplete: 'off', placeholder: 'Nome da nova pasta', 'aria-label': 'Nome da nova pasta' });
   campoNome.addEventListener('input', () => { S.nome = campoNome.value; atualizar(); });
   const zonaQtd = h('section', { class: 'folha-sec', hidden: unico });
+  const zonaDividir = h('section', { class: 'folha-sec', hidden: true });
+  const campoBase = h('input', { type: 'text', maxlength: '70', autocomplete: 'off', placeholder: 'Nome-base, por exemplo: Montes Claros', 'aria-label': 'Nome-base das pastas' });
+  campoBase.addEventListener('input', () => { S.base = campoBase.value; atualizar(); });
+  const nomesDivisao = () => { const b = S.base.trim() || 'Pasta'; return Array.from({ length: S.n }, (_, i) => `${b} ${i + 1}`); };
+  function desenharDividir() {
+    if (unico) return;
+    const chips = [100, 200, 300, 500].map((q) => h('button', { type: 'button', class: 'pilula', 'aria-pressed': String(S.tam === q), onclick: () => { S.tam = q; desenharDividir(); atualizar(); } }, num(q)));
+    const menos = h('button', { class: 'btn-icone btn-passo', type: 'button', 'aria-label': 'Menos uma pasta', disabled: S.n <= 1, onclick: () => { S.n = Math.max(1, S.n - 1); desenharDividir(); atualizar(); } }, icone('menos', 18));
+    const mais = h('button', { class: 'btn-icone btn-passo', type: 'button', 'aria-label': 'Mais uma pasta', disabled: S.n >= 20, onclick: () => { S.n = Math.min(20, S.n + 1); desenharDividir(); atualizar(); } }, icone('mais', 18));
+    zonaDividir.replaceChildren(h('h3', { text: 'Como dividir' }), campoBase,
+      h('p', { class: 'apoio-peq', text: 'Tamanho de cada pasta' }), h('div', { class: 'pilulas' }, chips),
+      h('p', { class: 'apoio-peq', text: 'Quantas pastas' }),
+      h('div', { class: 'passo' }, menos, h('output', { class: 'passo-v', 'aria-live': 'polite', text: String(S.n) }), mais, h('span', { class: 'apoio-peq', text: 'de 1 a 20' })));
+  }
   const resumo = h('p', { class: 'resumo-add', 'aria-live': 'polite' });
   const erro = h('p', { class: 'erro-inline', role: 'alert' });
   const botao = h('button', { class: 'btn btn-prim', type: 'button' }, 'Adicionar');
@@ -47,17 +61,20 @@ function folhaAdicionarPasta({ listaId, total: totalFiltro, totalComWhats, telef
   function desenharPastas() {
     const itens = S.pastas.map((p) => ({ v: String(p.id), nome: p.nome, n: `${num(p.contatos)} ${p.contatos === 1 ? 'contato' : 'contatos'}` }));
     itens.push({ v: 'nova', nome: 'Nova pasta', n: null });
+    if (!unico) itens.push({ v: 'dividir', nome: 'Dividir em várias pastas', n: 'Cria várias pastas de uma vez' });
     zonaPastas.replaceChildren(...itens.map((it) => {
       const id = uid('rd');
       const r = h('input', { type: 'radio', name: 'pasta-destino', id, value: it.v });
       r.checked = S.escolha === it.v;
       r.addEventListener('change', () => { S.escolha = it.v; desenharPastas(); atualizar(); if (it.v === 'nova') setTimeout(() => campoNome.focus(), 20); });
       return h('label', { class: 'radio-linha' + (S.escolha === it.v ? ' on' : ''), for: id }, r,
-        h('span', { class: 'radio-ic' }, icone(it.v === 'nova' ? 'mais' : 'pasta', 18)),
+        h('span', { class: 'radio-ic' }, icone(it.v === 'nova' ? 'mais' : it.v === 'dividir' ? 'listas' : 'pasta', 18)),
         h('span', { class: 'radio-tx' }, h('span', { class: 'radio-nome', text: it.nome }), it.n ? h('span', { class: 'radio-n', text: it.n }) : null),
         h('span', { class: 'radio-marca', 'aria-hidden': 'true' }, icone('check', 16)));
     }), campoNome);
     campoNome.hidden = S.escolha !== 'nova';
+    zonaQtd.hidden = unico || S.escolha === 'dividir';
+    zonaDividir.hidden = S.escolha !== 'dividir';
   }
   function desenharQtd() {
     if (unico) return;
@@ -72,6 +89,15 @@ function folhaAdicionarPasta({ listaId, total: totalFiltro, totalComWhats, telef
       h('div', { class: 'passo' }, menos, h('output', { class: 'passo-v', 'aria-live': 'polite', text: S.qtd === 0 ? 'Todos' : num(S.qtd) }), mais, h('span', { class: 'apoio-peq', text: 'de 100 em 100' })));
   }
   function atualizar() {
+    if (S.escolha === 'dividir') {
+      const nomes = nomesDivisao();
+      const lista = nomes.length <= 3 ? (nomes.length === 1 ? nomes[0] : `${nomes.slice(0, -1).join(', ')} e ${nomes[nomes.length - 1]}`) : `${nomes[0]} a ${nomes[nomes.length - 1]}`;
+      const cabem = Math.ceil(totalAtual() / S.tam);
+      resumo.textContent = `Serão criadas ${S.n} ${S.n === 1 ? 'pasta' : 'pastas'} de ${num(S.tam)} contatos: ${lista}.${S.n * S.tam > totalAtual() ? ` Há só ${num(totalAtual())} contatos no filtro: ${cabem < S.n ? 'as últimas pastas não serão criadas' : 'a última pasta fica menor'}.` : ''}`;
+      botao.disabled = !S.base.trim() || totalAtual() === 0;
+      if (!botao.dataset.ocupado) botao.textContent = `Criar ${S.n} ${S.n === 1 ? 'pasta' : 'pastas'}`;
+      return;
+    }
     const total = totalAtual(), n = efetivo();
     const rot = `Adicionar ${num(n)} ${n === 1 ? 'contato' : 'contatos'}`;
     if (!botao.dataset.ocupado) botao.textContent = rot;
@@ -88,6 +114,17 @@ function folhaAdicionarPasta({ listaId, total: totalFiltro, totalComWhats, telef
     botao.disabled = true; botao.dataset.ocupado = '1'; erro.textContent = '';
     botao.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Adicionando…');
     try {
+      if (S.escolha === 'dividir') {
+        const q = new URLSearchParams(queryFiltros());
+        if (S.soWhats) { q.delete('tipo_whatsapp'); q.append('tipo_whatsapp', 'pessoal'); q.append('tipo_whatsapp', 'business'); }
+        q.set('lista_id', listaId); q.set('pular_em_pastas', S.pular ? '1' : '0'); q.set('tamanho', String(S.tam)); q.set('pastas', String(S.n));
+        const r = await api(`/api/pastas/dividir?${q.toString()}`, { method: 'POST', corpo: { nome: S.base.trim() } });
+        m.fechar();
+        const np = (r.pastas || []).length;
+        avisar(`${num(np)} ${np === 1 ? 'pasta criada' : 'pastas criadas'} com ${num(r.adicionados)} contatos`, null, { href: '#/pastas', rotulo: 'Ver pastas' });
+        if (aoConcluir) aoConcluir(r);
+        return;
+      }
       let id = S.escolha, nomePasta = (S.pastas.find((p) => String(p.id) === S.escolha) || {}).nome;
       if (S.escolha === 'nova') {
         if (!S.criada) { nomePasta = S.nome.trim(); S.criada = { id: (await api('/api/pastas', { method: 'POST', corpo: { nome: nomePasta } })).id, nome: nomePasta }; }
@@ -115,12 +152,12 @@ function folhaAdicionarPasta({ listaId, total: totalFiltro, totalComWhats, telef
       h('button', { class: 'btn-icone', type: 'button', 'aria-label': 'Fechar', onclick: () => m.fechar() }, icone('x', 20))),
     h('div', { class: 'folha-corpo' },
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Pasta' }), zonaPastas),
-      zonaQtd,
+      zonaQtd, zonaDividir,
       unico ? null : h('section', { class: 'folha-sec' }, h('div', { class: 'grupo-linhas' }, swWhats.el, sw.el)),
       resumo),
     h('footer', { class: 'folha-rodape' }, erro, botao));
   const m = abrirModal(painel);
-  desenharQtd(); desenharPastas(); atualizar();
+  desenharQtd(); desenharDividir(); desenharPastas(); atualizar();
   zonaPastas.prepend(h('div', { class: 'sk-pilha' }, esqueleto('100%', '52px'), esqueleto('100%', '52px')));
   api('/api/pastas').then((ps) => { S.pastas = ps; S.escolha = ps.length ? String(ps[0].id) : 'nova'; S.carregou = true; desenharPastas(); atualizar(); })
     .catch((e) => { S.pastas = []; S.escolha = 'nova'; erro.textContent = e.status === 404 ? 'As pastas ainda não estão disponíveis neste servidor.' : e.message; desenharPastas(); atualizar(); });
@@ -315,7 +352,7 @@ async function telaPasta(raiz, id, subaba, qs) {
   const painelRes = h('div', { class: 'aba-painel', id: 'painel-res', role: 'tabpanel', 'aria-labelledby': 'aba-res', hidden: true });
   async function carregarResultados() {
     try { R = await api(`/api/pastas/${idUrl}/resultados`); } catch (e) { R = null; }
-    desenharFaixa(); painelRes.replaceChildren(R ? abaResultados(R) : estadoErro('Os resultados ainda não estão disponíveis neste servidor.', carregarResultados));
+    desenharFaixa(); desenharLegenda(); painelRes.replaceChildren(R ? abaResultados(R) : estadoErro('Os resultados ainda não estão disponíveis neste servidor.', carregarResultados));
   }
   async function recarregarPasta() {
     try { pasta = await api(`/api/pastas/${idUrl}`); desenharCab(); } catch (e) { /* mantém */ }
@@ -323,6 +360,12 @@ async function telaPasta(raiz, id, subaba, qs) {
   }
   async function recarregarTudo() { await recarregarPasta(); carregarResultados(); }
 
+  const legenda = h('div', { class: 'legenda-res', hidden: true });
+  function desenharLegenda() {
+    legenda.hidden = !(R && R.com_resultado);
+    if (legenda.hidden) return;
+    legenda.replaceChildren(h('span', { class: 'legenda-res-t', text: 'Resultado:' }), ...(RES.opcoes || []).map((o) => h('span', { class: 'legenda-res-i' }, h('i', { class: `dot-res dot-${corResultado(o.valor, o.rotulo)}`, 'aria-hidden': 'true' }), o.rotulo)));
+  }
   const resultado = h('p', { class: 'resultado', 'aria-live': 'polite' });
   const md = criarMestreDetalhe({
     url: (pagina) => `/api/pastas/${idUrl}/contatos?${new URLSearchParams({ ...(termo ? { busca: termo } : {}), pagina: String(pagina), por_pagina: '50' }).toString()}`,
@@ -359,7 +402,7 @@ async function telaPasta(raiz, id, subaba, qs) {
   }
   busca.addEventListener('input', debounce(() => { termo = busca.value.trim(); sincronizarHash(); md.carregar(true); }, 300));
   const painelContatos = h('div', { class: 'aba-painel', id: 'painel-contatos', role: 'tabpanel', 'aria-labelledby': 'aba-contatos' },
-    h('div', { class: 'barra-ferramentas' }, h('div', { class: 'combo combo-pilula busca-contatos' }, icone('busca', 18), busca)), resultado, md.el);
+    h('div', { class: 'barra-ferramentas' }, h('div', { class: 'combo combo-pilula busca-contatos' }, icone('busca', 18), busca)), legenda, resultado, md.el);
   const seg = segmentado({
     opcoes: [{ valor: 'contatos', rotulo: 'Contatos', id: 'aba-contatos', controla: 'painel-contatos' }, { valor: 'resultados', rotulo: 'Resultados', id: 'aba-res', controla: 'painel-res' }],
     valor: aba, rotulo: 'Visões da pasta', papel: 'tab', classe: 'seg-abas', aoMudar: (v) => definirAba(v),

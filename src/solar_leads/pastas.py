@@ -43,6 +43,8 @@ def _con() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS exportacoes (
           id INTEGER PRIMARY KEY AUTOINCREMENT, quando TEXT NOT NULL, origem TEXT NOT NULL, ref TEXT NOT NULL,
           descricao TEXT NOT NULL, contatos INTEGER NOT NULL, ip TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS acessos (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, quando TEXT NOT NULL, tipo TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS nao_contatar (
           telefone TEXT PRIMARY KEY, motivo TEXT NOT NULL DEFAULT '', criado_em TEXT NOT NULL);
         """
@@ -120,7 +122,7 @@ def adicionar(pasta_id: int, linhas: list[dict], lista_id: str, cidade: str) -> 
         )
         depois = con.execute("SELECT count(*) FROM pasta_contatos WHERE pasta_id = ?", [pasta_id]).fetchone()[0]
     novos = depois - antes
-    return novos, len(linhas) - novos
+    return novos, sum(1 for l in linhas if l.get("telefone")) - novos  # linha sem telefone não conta como "já estava"
 
 
 def remover(pasta_id: int, telefones: list[str]) -> int:
@@ -327,3 +329,17 @@ def exportacoes_recentes(limite: int = 20) -> list[dict]:
                 "SELECT quando, origem, descricao, contatos FROM exportacoes ORDER BY id DESC LIMIT ?", [limite]
             ).fetchall()
         ]
+
+
+# ---- Registro de acessos ----
+
+def registrar_acesso(tipo: str, ip: str = "") -> None:
+    """tipo: "entrou", "senha errada", "bloqueado" ou "saiu". Guarda os últimos 2 mil registros."""
+    with closing(_con()) as con, con:
+        con.execute("INSERT INTO acessos (quando, tipo, ip) VALUES (?, ?, ?)", [_agora(), tipo, ip[:60]])
+        con.execute("DELETE FROM acessos WHERE id <= (SELECT max(id) FROM acessos) - 2000")
+
+
+def acessos_recentes(limite: int = 30) -> list[dict]:
+    with closing(_con()) as con:
+        return [dict(l) for l in con.execute("SELECT quando, tipo, ip FROM acessos ORDER BY id DESC LIMIT ?", [limite]).fetchall()]

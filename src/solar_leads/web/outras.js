@@ -162,7 +162,7 @@ async function telaBase(raiz) {
         ajuste({ icone: 'check', tom: 'verde', titulo: 'Com WhatsApp', valor: num(w.com_whatsapp) }),
         ajuste({ icone: 'pessoa', tom: 'verde', titulo: 'Pessoais', valor: num(w.pessoais) }),
         ajuste({ icone: 'predio', tom: 'verde', titulo: 'Comerciais', valor: num(w.comerciais) })]),
-      blocoExportacoes());
+      blocoExportacoes(), blocoAcessos());
   }
   carregar();
 }
@@ -176,5 +176,19 @@ function blocoExportacoes() {
       ? ls.map((e) => ajuste({ icone: e.origem === 'pasta' ? 'pasta' : 'listas', tom: 'azul', titulo: e.descricao || (e.origem === 'pasta' ? 'Pasta' : 'Lista'), descricao: `${dataRelativa(e.quando)} · ${e.origem === 'pasta' ? 'pasta' : 'lista'}`, valor: `${num(e.contatos)} ${e.contatos === 1 ? 'contato' : 'contatos'}` }))
       : [ajuste({ icone: 'baixar', tom: 'cinza', titulo: 'Nenhuma exportação ainda', descricao: 'Quando você exportar uma lista ou pasta, ela aparece aqui.' })]));
   }).catch(() => { /* sem histórico neste servidor */ });
+  return zona;
+}
+
+/* ---------- Acessos ao sistema ---------- */
+function blocoAcessos() {
+  const zona = h('div', {});
+  const TIPOS = { entrou: ['check', 'verde', 'Entrou'], saiu: ['esquerda', 'cinza', 'Saiu'], 'senha errada': ['alerta', 'laranja', 'Senha errada'], bloqueado: ['alerta', 'vermelho', 'Bloqueado'] };
+  api('/api/acessos').then((itens) => {
+    const ls = (itens || []).slice(0, 30);
+    zona.replaceChildren(grupoAjustes('Acessos ao sistema', ls.length
+      ? ls.map((a) => { const [ic, tom, rot] = TIPOS[a.tipo] || ['info', 'cinza', a.tipo];
+        return ajuste({ icone: ic, tom, titulo: rot, descricao: dataRelativa(a.quando), valor: h('span', { class: 'ip-acesso', text: a.ip || '' }) }); })
+      : [ajuste({ icone: 'info', tom: 'cinza', titulo: 'Nenhum acesso registrado ainda' })]));
+  }).catch(() => { /* sem registro de acessos neste servidor */ });
   return zona;
 }

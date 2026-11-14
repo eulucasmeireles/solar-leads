@@ -176,9 +176,15 @@ def entrar(entrada: Entrada, request: Request) -> JSONResponse:
     if not SENHA_HASH or not _senha_confere(entrada.senha):
         time.sleep(0.8)  # atrasa quem tenta adivinhar
         erros += 1
-        _tentativas[ip] = [0, time.time() + BLOQUEIO_S] if erros >= MAX_ERROS else [erros, 0.0]
+        bloqueou = erros >= MAX_ERROS
+        _tentativas[ip] = [0, time.time() + BLOQUEIO_S] if bloqueou else [erros, 0.0]
+        if len(_tentativas) > 5000:  # não deixa a tabela de tentativas crescer sem fim
+            for velho in [k for k, v in _tentativas.items() if v[1] < time.time() and v[0] == 0]:
+                _tentativas.pop(velho, None)
+        pastas.registrar_acesso("bloqueado" if bloqueou else "senha errada", ip)
         raise HTTPException(401, "Senha incorreta.")
     _tentativas.pop(ip, None)
+    pastas.registrar_acesso("entrou", ip)
     validade, marca = int(time.time()) + VALIDADE_S, os.urandom(8).hex()
     resposta = JSONResponse({"ok": True})
     resposta.set_cookie(
@@ -188,8 +194,14 @@ def entrar(entrada: Entrada, request: Request) -> JSONResponse:
     return resposta
 
 
+@app.get("/api/acessos")
+def acessos() -> list[dict]:
+    return pastas.acessos_recentes()
+
+
 @app.post("/api/logout")
-def sair() -> JSONResponse:
+def sair(request: Request) -> JSONResponse:
+    pastas.registrar_acesso("saiu", _ip(request))
     _epoca(nova=True)  # a senha é única: sair encerra a sessão em todos os aparelhos
     resposta = JSONResponse({"ok": True})
     resposta.delete_cookie(COOKIE, path="/")
@@ -222,7 +234,16 @@ def _parquet(id_: str) -> Path:
     meta = _ler_meta(id_)
     if meta["status"] != "pronta":
         raise HTTPException(409, "A lista ainda não está pronta.")
-    return LISTAS / f"{id_}.parquet"
+    arquivo = LISTAS / f"{id_}.parquet"
+    if not arquivo.exists():
+        raise HTTPException(404, "Lista não encontrada.")
+    return arquivo
+
+
+@app.exception_handler(duckdb.IOException)
+async def _dados_indisponiveis(request: Request, erro: duckdb.IOException) -> JSONResponse:
+    # Lista apagada no meio de uma consulta, ou base ocupada: responde com clareza em vez de erro 500.
+    return JSONResponse({"detail": "Os dados não estão disponíveis agora. Atualize a página e tente de novo."}, status_code=503)
 
 
 # Uma geração interrompida por reinício do servidor não volta sozinha.
@@ -862,6 +883,41 @@ def adicionar_a_pasta(
         linhas = _linhas(con.execute(f"{cte} SELECT * EXCLUDE (dono_chave, ordem) FROM r ORDER BY {f.ordem} {limite}", params))
     novos, ja = pastas.adicionar(pasta_id, linhas, lista_id, f"{meta['cidade'].title()}/{meta['uf']}")
     return {"adicionados": novos, "ja_estavam": ja, "total_na_pasta": _pasta(pasta_id)["contatos"]}
+
+
+@app.post("/api/pastas/dividir")
+def dividir_em_pastas(
+    pedido: NomeDaPasta, lista_id: str, f: Annotated[Filtros, Depends()],
+    tamanho: int = 100, pastas_n: Annotated[int, Query(alias="pastas")] = 3, pular_em_pastas: int = 1,
+) -> dict:
+    """Cria várias pastas de uma vez ("Nome 1", "Nome 2"...), cada uma com `tamanho` contatos do filtro atual."""
+    if not 1 <= tamanho <= 5000 or not 1 <= pastas_n <= 20:
+        raise HTTPException(400, "Escolha de 1 a 20 pastas, com até 5.000 contatos cada.")
+    base = " ".join(pedido.nome.split())
+    if not base:
+        raise HTTPException(400, "Dê um nome para as pastas.")
+    nomes = [f"{base} {i}" for i in range(1, pastas_n + 1)]
+    existentes = {p["nome"].lower() for p in pastas.listar()}
+    repetidos = [n for n in nomes if n.lower() in existentes]
+    if repetidos:
+        raise HTTPException(400, f"Já existe uma pasta chamada {repetidos[0]}. Escolha outro nome.")
+    meta = _ler_meta(lista_id)
+    cte, params = f.consulta(_parquet(lista_id), "fora" if pular_em_pastas and not f.pasta else None)
+    linhas = _linhas(
+        duckdb.connect().execute(
+            f"{cte} SELECT * EXCLUDE (dono_chave, ordem) FROM r ORDER BY {f.ordem} LIMIT {tamanho * pastas_n}", params
+        )
+    )
+    criadas, total = [], 0
+    for i, nome in enumerate(nomes):
+        parte = linhas[i * tamanho : (i + 1) * tamanho]
+        if not parte:
+            break  # acabaram os contatos: não cria pasta vazia
+        pasta_id = pastas.criar(nome)
+        novos, _ = pastas.adicionar(pasta_id, parte, lista_id, f"{meta['cidade'].title()}/{meta['uf']}")
+        criadas.append({"id": pasta_id, "nome": nome, "contatos": novos})
+        total += novos
+    return {"pastas": criadas, "adicionados": total}
 
 
 @app.get("/api/pastas/{pasta_id}/contatos")
