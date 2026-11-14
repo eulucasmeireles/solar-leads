@@ -126,7 +126,7 @@ def consultar(
             c: (d, k, n, o)
             for c, d, k, n, o in con.execute(
                 "SELECT cnpj_basico, min(desde), round(sum(kw), 1), sum(sistemas), "
-                "array_to_string(list_distinct(list(onde))[:3], ', ') FROM gd_pj "
+                "array_to_string(list_sort(list_distinct(list(onde)))[:3], ', ') FROM gd_pj "
                 "WHERE cnpj_basico IN (SELECT unnest(?)) GROUP BY 1",
                 [sorted({c[:8] for c in cnpjs})],
             ).fetchall()

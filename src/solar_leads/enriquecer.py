@@ -318,7 +318,7 @@ def _perfil_do_dono(con: duckdb.DuckDBPyConnection, chaves: list[str]) -> dict[s
             SELECT chave, count(*), count(*) FILTER (WHERE r.matriz_ativa),
                    coalesce(sum(least(try_cast(replace(r.capital_social, ',', '.') AS DOUBLE), ?)) FILTER (WHERE r.matriz_ativa), 0),
                    list({'b': r.cnpj_basico, 'n': r.razao_social}
-                        ORDER BY try_cast(replace(r.capital_social, ',', '.') AS DOUBLE) DESC NULLS LAST)
+                        ORDER BY try_cast(replace(r.capital_social, ',', '.') AS DOUBLE) DESC NULLS LAST, r.cnpj_basico)
                      FILTER (WHERE r.matriz_ativa)
             FROM emp LEFT JOIN empresa_resumo r USING (cnpj_basico) GROUP BY 1
             """,
@@ -344,7 +344,7 @@ def _perfil_do_dono(con: duckdb.DuckDBPyConnection, chaves: list[str]) -> dict[s
           FROM empresas WHERE cnpj_basico IN (SELECT cnpj_basico FROM ativas)
         )
         SELECT chave, count(*), count(a.cnpj_basico), coalesce(sum(i.capital), 0),
-               list({'b': i.cnpj_basico, 'n': i.razao_social} ORDER BY i.capital DESC NULLS LAST)
+               list({'b': i.cnpj_basico, 'n': i.razao_social} ORDER BY i.capital DESC NULLS LAST, i.cnpj_basico)
                  FILTER (WHERE i.cnpj_basico IS NOT NULL)
         FROM emp LEFT JOIN ativas a USING (cnpj_basico) LEFT JOIN info i USING (cnpj_basico) GROUP BY 1
         """,
@@ -545,7 +545,7 @@ def enriquecer(
                 anos_encerrada=anos_encerrada,
             )
             avaliados.append({"tel": tel, "pontos": pontos, "faixa": faixa, "motivos": motivos})
-        avaliados.sort(key=lambda a: -a["pontos"])
+        avaliados.sort(key=lambda a: (-a["pontos"], a["tel"]))  # empate: sempre o mesmo número
 
         nota, motivos_solar = aptidao_solar(
             cnae=(est or {}).get("cnae_fiscal"),
@@ -705,7 +705,8 @@ def escolher_telefone(lead: dict, whatsapp: dict[str, dict] | None = None, so_pe
             ativos.append(t)
         sem_conta = bool(opcoes) and not ativos
         opcoes = [t for t in ativos if not so_pessoal or t["tipo"] == "pessoal"]
-        opcoes.sort(key=lambda t: -t["pontos"])
+        # empate: WhatsApp confirmado na frente, depois sempre o mesmo número
+        opcoes.sort(key=lambda t: (-t["pontos"], not t["tipo"], t["tel"]))
         verificado = "não" if sem_conta else "sim" if opcoes and opcoes[0]["tipo"] else "não verificado"
     escolhido = opcoes[0] if opcoes else None
     alternativo = opcoes[1] if len(opcoes) > 1 else None
