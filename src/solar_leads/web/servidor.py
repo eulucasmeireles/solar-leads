@@ -781,11 +781,12 @@ def _csv(linhas: list[list], nome: str) -> StreamingResponse:
 
 
 @app.get("/api/listas/{id_}/exportar")
-def exportar(id_: str, f: Annotated[Filtros, Depends()]) -> StreamingResponse:
+def exportar(id_: str, f: Annotated[Filtros, Depends()], request: Request) -> StreamingResponse:
     cte, params = f.consulta(_parquet(id_))
     sel = ", ".join(pipeline.CHAVES)
     linhas = duckdb.connect().execute(f"{cte} SELECT {sel} FROM r ORDER BY {f.ordem}", params).fetchall()
     meta = _ler_meta(id_)
+    pastas.registrar_exportacao("lista", id_, f"Lista de {meta['cidade'].title()}/{meta['uf']}", len(linhas), _ip(request))
     return _csv(linhas, f"solar-leads-{pipeline.slug(meta['cidade'])}-{meta['uf'].lower()}-{datetime.now():%Y%m%d-%H%M}.csv")
 
 
@@ -880,10 +881,83 @@ def remover_da_pasta(pasta_id: int, telefone: Lista = None) -> dict:
     return {"removidos": pastas.remover(pasta_id, telefone or [])}
 
 
+# ---------- resultados dos disparos ----------
+
+class Resultado(BaseModel):
+    resultado: str = ""
+    telefones: list[str] = []
+    texto: str = ""
+    todos_sem_resultado: bool = False
+
+
+def _refletir_no_whatsapp(resultado: str, telefones_e164: list[str]) -> None:
+    """O resultado do disparo também diz se o número tem WhatsApp: não entregue = não tem; quem respondeu = tem."""
+    nacionais = [t.removeprefix("+55") for t in telefones_e164]
+    if not nacionais or resultado not in pastas.RESPONDEU | {"nao_entregue"}:
+        return
+    try:
+        con = cnpj_db.conectar(tentativas=5)
+    except duckdb.IOException:
+        return  # base ocupada gerando lista; o resultado em si já ficou gravado na pasta
+    try:
+        whatsapp._garantir_cache(con)
+        if resultado == "nao_entregue":
+            # Quem já estava verificado só muda de "tem" para "não tem" (o tipo de conta fica guardado);
+            # quem nunca foi verificado entra como "não tem".
+            con.execute("UPDATE whatsapp_tipo SET tem = false, verificado_em = now() WHERE tel IN (SELECT unnest(?))", [nacionais])
+            con.execute(
+                "INSERT INTO whatsapp_tipo SELECT t, false, false, '', now() FROM (SELECT unnest(?) AS t) "
+                "WHERE t NOT IN (SELECT tel FROM whatsapp_tipo)",
+                [nacionais],
+            )
+        else:
+            con.execute("UPDATE whatsapp_tipo SET tem = true, verificado_em = now() WHERE tel IN (SELECT unnest(?))", [nacionais])
+    finally:
+        con.close()
+    _cache.pop("totais-whatsapp", None)
+
+
+@app.get("/api/resultados/opcoes")
+def opcoes_de_resultado() -> list[dict]:
+    return [{"valor": v, "rotulo": r} for v, r in pastas.RESULTADOS]
+
+
+@app.get("/api/resultados")
+def resultados_gerais() -> dict:
+    return pastas.resumo_resultados()
+
+
+@app.get("/api/pastas/{pasta_id}/resultados")
+def resultados_da_pasta(pasta_id: int) -> dict:
+    _pasta(pasta_id)
+    return pastas.resumo_resultados(pasta_id)
+
+
+@app.post("/api/pastas/{pasta_id}/resultados")
+def registrar_resultados(pasta_id: int, pedido: Resultado) -> dict:
+    _pasta(pasta_id)
+    brutos = pedido.telefones + [l for l in pedido.texto.splitlines() if l.strip()]
+    if len(brutos) > 20_000:
+        raise HTTPException(400, "Envie no máximo 20 mil números por vez.")
+    validos = [t for t in (_e164(b) for b in brutos) if t]
+    try:
+        marcados, fora, alvo = pastas.marcar_resultado(pasta_id, pedido.resultado, validos, pedido.todos_sem_resultado)
+    except pastas.PastaInvalida as e:
+        raise HTTPException(400, str(e)) from e
+    _refletir_no_whatsapp(pedido.resultado, alvo)
+    return {"marcados": marcados, "nao_encontrados": fora + (len(brutos) - len(validos))}
+
+
+@app.get("/api/exportacoes")
+def exportacoes() -> list[dict]:
+    return pastas.exportacoes_recentes()
+
+
 @app.get("/api/pastas/{pasta_id}/exportar")
-def exportar_pasta(pasta_id: int) -> StreamingResponse:
+def exportar_pasta(pasta_id: int, request: Request) -> StreamingResponse:
     pasta = _pasta(pasta_id)
     _, linhas = pastas.contatos(pasta_id, por_pagina=10**9)
+    pastas.registrar_exportacao("pasta", str(pasta_id), f"Pasta {pasta['nome']}", len(linhas), _ip(request))
     marca = f"pasta-{pipeline.slug(pasta['nome'])}"
     saida = []
     for l in linhas:

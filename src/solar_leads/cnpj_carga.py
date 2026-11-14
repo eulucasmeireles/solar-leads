@@ -165,6 +165,19 @@ def main() -> int:
             meses = [n for n, _ in listar(cli, "") if re.fullmatch(r"\d{4}-\d{2}", n)]
             mes = max(meses)
         log(f"mês: {mes}")
+        # Uma base é sempre de um mês só. Se já há arquivos de outro mês, eles vão para uma pasta
+        # à parte antes de começar, para a base nova não sair misturada com a antiga.
+        marca = OUT / "_mes.txt"
+        resumo_antigo = OUT / "_carga.json"
+        mes_atual = marca.read_text().strip() if marca.exists() else (
+            json.loads(resumo_antigo.read_text()).get("mes") if resumo_antigo.exists() else None
+        )
+        if mes_atual and mes_atual != mes and list(OUT.glob("*.parquet")):
+            guardada = OUT.with_name(f"{OUT.name}-{mes_atual}")
+            log(f"a base atual é de {mes_atual}; movendo para {guardada} antes de carregar {mes}")
+            OUT.rename(guardada)
+            OUT.mkdir(parents=True)
+        marca.write_text(mes)
         arquivos = {n: t for n, t in listar(cli, f"{mes}/") if n.endswith(".zip")}
 
         def tabela_de(n):
@@ -200,6 +213,10 @@ def main() -> int:
                 n_csv, n_pq = converter(destino, tabela, parquet)
                 aviso = "" if n_csv == n_pq else f"  ATENÇÃO: diferença csv-parquet = {n_csv - n_pq}"
                 log(f"  convertido em {time.time() - t1:.0f}s: {n_pq} linhas (wc -l: {n_csv}){aviso}")
+                # Poucas linhas de diferença são quebras de linha dentro de aspas; muitas indicam conversão errada.
+                if abs(n_csv - n_pq) > max(50, n_csv // 10_000):
+                    parquet.unlink()
+                    raise RuntimeError(f"diferença de {n_csv - n_pq} linhas entre o CSV e o Parquet")
                 destino.unlink()
             except Exception as e:  # noqa: BLE001 - registra e segue para o próximo arquivo
                 log(f"{nome}: FALHOU: {e!r}")

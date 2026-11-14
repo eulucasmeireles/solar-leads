@@ -11,6 +11,10 @@
         var t = new URLSearchParams(location.search).get('tema');
         if (!t) { try { t = localStorage.getItem('solar-tema'); } catch (e) { t = null; } }
         if (t === 'escuro') document.documentElement.setAttribute('data-tema', 'escuro');
+        // Dados sensíveis borrados: pela URL (?demo=1) ou pela escolha guardada no botão de olho.
+        var p = new URLSearchParams(location.search).get('demo') === '1';
+        if (!p) { try { p = localStorage.getItem('solar-privado') === '1'; } catch (e) { p = false; } }
+        if (p) document.documentElement.setAttribute('data-demo', '');
       } catch (e) { /* tema claro */ }
     })();
   </script>
@@ -35,7 +39,8 @@
           <a href="#/base" data-rota="base" data-icone="base"><span class="nav-ic"></span><span class="nav-tx">Base</span></a>
         </nav>
         <div class="topo-dir">
-          <button class="btn-tema" id="btn-tema" type="button" aria-label="Alternar tema claro e escuro"></button>
+          <button class="btn-tema" id="btn-olho" type="button" aria-pressed="false" aria-label="Borrar dados sensíveis"></button>
+        <button class="btn-tema" id="btn-tema" type="button" aria-label="Alternar tema claro e escuro"></button>
           <button class="btn-sair" id="btn-sair" type="button" hidden>Sair</button>
         </div>
       </div>

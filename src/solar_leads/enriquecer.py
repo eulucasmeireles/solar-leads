@@ -76,7 +76,7 @@ def _cpf6(dono: dict | None, est: dict | None) -> str:
         return ""
     m = re.search(r"\*{3}(\d{6})\*{2}", dono.get("chave") or "")
     if m:
-        return m.group(1)
+        return m.group(1) if m.group(1) != "000000" else ""
     # Empresário individual: às vezes o CPF inteiro vem na razão social.
     m = re.search(r"(?<!\d)(\d{11})(?!\d)", (est or {}).get("razao_social") or "") if not dono.get("chave") else None
     return m.group(1)[3:9] if m else ""
@@ -300,9 +300,15 @@ def _donos(con: duckdb.DuckDBPyConnection, basicos: list[str]) -> dict[str, list
     return donos
 
 
+def _chave_identifica(chave: str) -> bool:
+    """A chave só une a mesma pessoa em várias empresas se trouxer os seis dígitos do CPF (e não zeros)."""
+    m = re.search(r"\*{3}(\d{6})\*{2}", (chave or "").split("|", 1)[-1])
+    return bool(m) and m.group(1) != "000000"
+
+
 def _perfil_do_dono(con: duckdb.DuckDBPyConnection, chaves: list[str]) -> dict[str, dict]:
     """Para cada dono (chave com CPF): empresas em que é sócio, quantas ativas, capital somado e as maiores."""
-    chaves = [c for c in set(chaves) if re.search(r"\d{6}", c.split("|", 1)[-1])]
+    chaves = [c for c in set(chaves) if _chave_identifica(c)]
     if not chaves:
         return {}
     if cnpj_db.tem_tabela(con, "empresa_resumo"):
@@ -383,7 +389,7 @@ def _frequencias_email(con: duckdb.DuckDBPyConnection, emails: set[str]) -> dict
 def _telefones_do_dono(con: duckdb.DuckDBPyConnection, chaves: list[str]) -> dict[str, dict[str, int]]:
     """Para cada dono, {telefone: em quantas empresas dele o número aparece}."""
     # Só cruza quando a chave tem os seis dígitos do CPF; nome sozinho confunde homônimos.
-    chaves = [c for c in set(chaves) if re.search(r"\d{6}", c.split("|", 1)[-1])]
+    chaves = [c for c in set(chaves) if _chave_identifica(c)]
     if not chaves:
         return {}
     linhas = con.execute(
@@ -505,7 +511,7 @@ def enriquecer(
     donos_com_solar = {
         p["dono"]["chave"]
         for p in pre
-        if p["est"] and p["dono"] and re.search(r"\d{6}", p["dono"].get("chave") or "")
+        if p["est"] and p["dono"] and _chave_identifica(p["dono"].get("chave") or "")
         and (p["est"]["cnpj"] in solar_pj or p["est"]["cnpj_basico"] in solar_grupo)
     }
     por_cep = dict(
@@ -517,6 +523,8 @@ def enriquecer(
     for p in pre:
         lugar, est, dono = p["lugar"], p["est"], p["dono"]
         email = ((est or {}).get("email") or "").strip()
+        fechou = _data((est or {}).get("data_situacao")) if (est or {}).get("situacao") in ENCERRADAS else None
+        anos_encerrada = (date.today() - fechou).days / 365.25 if fechou else None
         vezes_email = freq_email.get(email, 1)
         # E-mail em muitas empresas é de contador, a menos que sejam as empresas do próprio dono.
         do_proprio_dono = bool(dono) and vezes_email <= (perfis.get(dono.get("chave") or "", {}).get("total") or 0)
@@ -532,6 +540,7 @@ def enriquecer(
                 de_outra_empresa_do_dono=origem.get("dono", False),
                 dono_unico=bool(dono and (dono["unico"] or (est or {}).get("mei"))),
                 email_contabilidade=contabil,
+                anos_encerrada=anos_encerrada,
             )
             avaliados.append({"tel": tel, "pontos": pontos, "faixa": faixa, "motivos": motivos})
         avaliados.sort(key=lambda a: -a["pontos"])

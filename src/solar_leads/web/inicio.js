@@ -45,13 +45,14 @@ async function excluirLista(m, aposExcluir) {
 
 /* vigia as listas: busca, desenha e repete a cada 2 s enquanto houver alguma em andamento */
 function vigiarListas(desenhar, aoErro) {
-  let vivo = true, timer = null, ultimo = '', anterior = new Map();
+  let vivo = true, timer = null, ultimo = '', anterior = new Map(), falhas = 0;
   const live = h('div', { class: 'so-leitor', 'aria-live': 'polite' });
   document.getElementById('conteudo').append(live);
   async function ciclo(primeira) {
     try {
       const lista = (await api('/api/listas')).slice().sort(porData);
       if (!vivo) return;
+      falhas = 0;
       const sig = JSON.stringify(lista.map((m) => [m.id, m.status, m.etapa, m.erro, m.resumo && m.resumo.contatos_para_disparo]));
       if (sig !== ultimo) {
         ultimo = sig; desenhar(lista);
@@ -63,7 +64,11 @@ function vigiarListas(desenhar, aoErro) {
         anterior = new Map(lista.map((m) => [m.id, m]));
       }
       if (lista.some(EM_ANDAMENTO)) timer = setTimeout(() => ciclo(false), 2000);
-    } catch (e) { if (vivo && primeira) aoErro(e); else if (vivo) timer = setTimeout(() => ciclo(false), 4000); }
+    } catch (e) {
+      if (!vivo) return;
+      falhas += 1;
+      if (primeira || falhas >= 5) aoErro(e); else timer = setTimeout(() => ciclo(false), 4000);
+    }
   }
   aoSair(() => { vivo = false; clearTimeout(timer); live.remove(); });
   ciclo(true);
@@ -170,7 +175,7 @@ function telaInicio(raiz) {
     h('section', { class: 'secao', 'aria-labelledby': 'tit-rec' },
       h('header', { class: 'secao-cab' }, h('h2', { id: 'tit-rec', text: 'Suas listas' }), h('a', { class: 'link-seta', href: '#/listas' }, 'Ver todas', icone('direita', 16))),
       gradeRecentes));
-  setTimeout(() => combo.input.focus({ preventScroll: true }), 80);
+  if (window.innerWidth >= 700) setTimeout(() => combo.input.focus({ preventScroll: true }), 80);
 }
 
 /* ---------- Listas ---------- */

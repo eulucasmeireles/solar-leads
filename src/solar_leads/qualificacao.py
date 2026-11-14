@@ -146,6 +146,7 @@ def pontuar_contato(
     de_outra_empresa_do_dono: bool,
     dono_unico: bool,
     email_contabilidade: bool,
+    anos_encerrada: float | None = None,
 ) -> tuple[int, str, list[str]]:
     """Chance (0 a 100) de o número ser do dono, a faixa (A/B/C) e os motivos."""
     motivos: list[str] = []
@@ -177,6 +178,10 @@ def pontuar_contato(
     if email_contabilidade and not no_maps:
         pontos -= 20
         motivos.append("e-mail do cadastro é de contabilidade")
+    # Telefone que só aparece numa empresa fechada há muito tempo tem boa chance de já ser de outra pessoa.
+    if anos_encerrada is not None and anos_encerrada >= 10 and not no_maps and empresas_do_dono_com_o_numero < 2 and not de_outra_empresa_do_dono:
+        pontos -= 15
+        motivos.append(f"empresa encerrada há {int(anos_encerrada)} anos (o número pode ter mudado de dono)")
 
     pontos = max(0, min(100, pontos))
     faixa = "A" if pontos >= 65 else "B" if pontos >= 40 else "C"

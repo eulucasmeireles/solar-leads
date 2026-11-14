@@ -2,15 +2,27 @@
 /* Solar Leads - tela de uma lista (contatos em mestre-detalhe e visão geral) */
 
 const SOLAR_JA_TEM = ['empresa já tem', 'outra unidade da empresa tem', 'outra empresa do dono tem'];
+const mesmo = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+const tem = (arr, v) => arr.includes(v);
+const sem = (arr, v) => arr.filter((x) => x !== v);
+/* atalhos combináveis: cada um liga e desliga o próprio conjunto de filtros */
 const ATALHOS = [
-  { id: 'whats', rotulo: 'Com WhatsApp', dica: 'Só quem tem WhatsApp confirmado (pessoal ou comercial)', filtros: { tipo_whatsapp: ['pessoal', 'business'] }, exigeWhats: true },
-  { id: 'melhores', rotulo: 'Melhores contatos', dica: 'CNPJ ativo, contato forte, aptidão 4 ou mais e sem energia solar', filtros: { situacao: ['ativa'], faixa: ['A'], aptidao_min: 4, solar: ['sem registro'] } },
-  { id: 'casa', rotulo: 'Casa do dono', dica: 'Contatos em que a casa do dono é uma boa oportunidade', filtros: { oportunidade: ['Casa', 'Casa e empresa'] } },
-  { id: 'pessoal', rotulo: 'WhatsApp pessoal', dica: 'Só números com WhatsApp pessoal', filtros: { tipo_whatsapp: ['pessoal'] }, exigeWhats: true },
-  { id: 'sem-solar', rotulo: 'Sem energia solar', dica: 'Sem registro na ANEEL', filtros: { solar: ['sem registro'] } },
-  { id: 'ja-tem', rotulo: 'Já têm solar', dica: 'A empresa, outra unidade ou outra empresa do dono já tem', filtros: { solar: SOLAR_JA_TEM } },
-  { id: 'fora', rotulo: 'Fora de pastas', dica: 'Contatos que ainda não estão em nenhuma pasta', filtros: { pasta: 'fora' } },
-  { id: 'todos', rotulo: 'Todos', dica: 'Sem filtros', filtros: {} },
+  { id: 'whats', rotulo: 'Com WhatsApp', dica: 'Só quem tem WhatsApp confirmado (pessoal ou comercial)', exigeWhats: true,
+    ativo: (f) => mesmo(f.tipo_whatsapp, ['pessoal', 'business']), liga: (f) => { f.tipo_whatsapp = ['pessoal', 'business']; }, desliga: (f) => { f.tipo_whatsapp = []; } },
+  { id: 'melhores', rotulo: 'Melhores contatos', dica: 'CNPJ ativo, contato forte, potencial 4 ou mais e sem energia solar',
+    ativo: (f) => tem(f.situacao, 'ativa') && tem(f.faixa, 'A') && f.aptidao_min >= 4 && tem(f.solar, 'sem registro'),
+    liga: (f) => { if (!tem(f.situacao, 'ativa')) f.situacao.push('ativa'); if (!tem(f.faixa, 'A')) f.faixa.push('A'); f.aptidao_min = Math.max(f.aptidao_min, 4); f.solar = ['sem registro']; },
+    desliga: (f) => { f.situacao = sem(f.situacao, 'ativa'); f.faixa = sem(f.faixa, 'A'); f.aptidao_min = 0; f.solar = sem(f.solar, 'sem registro'); } },
+  { id: 'casa', rotulo: 'Casa do dono', dica: 'Contatos em que a casa do dono é uma boa oportunidade',
+    ativo: (f) => mesmo(f.oportunidade, ['Casa', 'Casa e empresa']), liga: (f) => { f.oportunidade = ['Casa', 'Casa e empresa']; }, desliga: (f) => { f.oportunidade = []; } },
+  { id: 'pessoal', rotulo: 'WhatsApp pessoal', dica: 'Só números com WhatsApp pessoal', exigeWhats: true,
+    ativo: (f) => mesmo(f.tipo_whatsapp, ['pessoal']), liga: (f) => { f.tipo_whatsapp = ['pessoal']; }, desliga: (f) => { f.tipo_whatsapp = []; } },
+  { id: 'sem-solar', rotulo: 'Sem energia solar', dica: 'Sem registro na ANEEL',
+    ativo: (f) => mesmo(f.solar, ['sem registro']), liga: (f) => { f.solar = ['sem registro']; }, desliga: (f) => { f.solar = []; } },
+  { id: 'ja-tem', rotulo: 'Já têm solar', dica: 'A empresa, outra unidade ou outra empresa do dono já tem',
+    ativo: (f) => mesmo(f.solar, SOLAR_JA_TEM), liga: (f) => { f.solar = SOLAR_JA_TEM.slice(); }, desliga: (f) => { f.solar = []; } },
+  { id: 'fora', rotulo: 'Fora de pastas', dica: 'Contatos que ainda não estão em nenhuma pasta',
+    ativo: (f) => f.pasta === 'fora', liga: (f) => { f.pasta = 'fora'; }, desliga: (f) => { f.pasta = ''; } },
 ];
 const ORDENS = [['relevancia', 'Mais relevantes'], ['aptidao', 'Maior potencial'], ['chance', 'Maior chance de ser o dono'], ['nome', 'Nome (A a Z)'], ['empresa', 'Empresa (A a Z)']];
 const CHAVES_LISTA = ['faixa', 'situacao', 'papel', 'bairro', 'atividade', 'tipo_whatsapp', 'solar', 'oportunidade'];
@@ -18,6 +30,26 @@ const CHAVES_LISTA = ['faixa', 'situacao', 'papel', 'bairro', 'atividade', 'tipo
 const filtrosPadrao = () => ({ busca: '', faixa: [], situacao: [], solar: [], tipo_whatsapp: [], papel: [], bairro: [], atividade: [], oportunidade: [], pasta: '', aptidao_min: 0, com_email: false, so_disparo: true });
 const copiaFiltros = (f) => JSON.parse(JSON.stringify(f));
 const igualPadrao = (f) => JSON.stringify(f) === JSON.stringify(filtrosPadrao());
+
+/* filtros, ordem e busca viajam no hash: #/lista/<id>?faixa=A&ordem=aptidao */
+function filtrosDoHash(qs) {
+  const q = new URLSearchParams(qs || '');
+  const f = filtrosPadrao();
+  CHAVES_LISTA.forEach((k) => { f[k] = q.getAll(k); });
+  const apt = Number(q.get('aptidao_min')); if (apt > 0 && apt <= 10) f.aptidao_min = Math.round(apt);
+  f.com_email = q.get('com_email') === '1';
+  f.so_disparo = q.get('so_disparo') !== '0';
+  f.busca = q.get('busca') || '';
+  f.pasta = q.get('pasta') || '';
+  const ordem = ORDENS.some(([v]) => v === q.get('ordem')) ? q.get('ordem') : 'relevancia';
+  return { f, ordem };
+}
+function queryDoHash(f, ordem) {
+  const q = new URLSearchParams(queryDosFiltros(f));
+  if (q.get('so_disparo') === '1') q.delete('so_disparo');
+  if (ordem && ordem !== 'relevancia') q.set('ordem', ordem);
+  return q.toString();
+}
 
 /* ÚNICA função que monta a query de /contatos, /painel e /exportar */
 function queryDosFiltros(f, extras = {}) {
@@ -45,7 +77,7 @@ const ROTULO_FILTRO = {
 const TITULO_FILTRO = { oportunidade: 'Onde está a oportunidade', faixa: 'Força do contato', situacao: 'Situação do CNPJ', solar: 'Energia solar', tipo_whatsapp: 'WhatsApp', papel: 'Papel do contato', bairro: 'Bairro', atividade: 'Atividade' };
 
 /* ---------- entrada ---------- */
-async function telaLista(raiz, id, subaba) {
+async function telaLista(raiz, id, subaba, qs) {
   document.title = 'Lista · Solar Leads';
   const rota = app.rota;
   raiz.append(h('div', { class: 'lista-cab', 'aria-busy': 'true' }, esqueleto('260px', '38px'), esqueleto('420px', '16px', 'mt'), esqueleto('100%', '90px', 'mt')));
@@ -58,9 +90,9 @@ async function telaLista(raiz, id, subaba) {
   if (rota !== app.rota) return;
   raiz.replaceChildren();
   document.title = `${titleCase(meta.cidade)} · Solar Leads`;
-  if (EM_ANDAMENTO(meta)) return viewGerando(raiz, meta);
+  if (EM_ANDAMENTO(meta)) return viewGerando(raiz, meta, qs);
   if (meta.status === 'erro') return viewErro(raiz, meta);
-  return montarLista(raiz, meta, subaba === 'painel' ? 'geral' : 'contatos');
+  return montarLista(raiz, meta, subaba === 'painel' ? 'geral' : 'contatos', qs);
 }
 
 async function gerarDeNovo(meta) {
@@ -86,21 +118,33 @@ function cabecalhoDaLista(meta, acoes) {
       acoes ? h('div', { class: 'pag-acoes' }, acoes) : null));
 }
 
-function viewGerando(raiz, meta) {
+function viewGerando(raiz, meta, qs) {
   const etapa = h('p', { class: 'gerando-etapa', 'aria-live': 'polite', text: meta.etapa || (meta.status === 'na_fila' ? 'Aguardando a vez na fila…' : 'Começando…') });
   const titulo = h('h2', { text: meta.status === 'na_fila' ? 'Sua lista está na fila' : 'Montando sua lista' });
   raiz.append(cabecalhoDaLista(meta), h('section', { class: 'cartao gerando' },
     h('span', { class: 'gerando-sol', 'aria-hidden': 'true' }, icone('sol', 30)), titulo, etapa, progresso(null, 'Gerando a lista'),
     h('p', { class: 'dica', text: 'Pode levar alguns minutos em cidades grandes. Você pode sair desta tela: a lista continua sendo gerada.' })));
-  let vivo = true, t = null;
+  let vivo = true, t = null, falhas = 0;
+  const cartao = raiz.querySelector('.gerando');
   async function ciclo() {
     try {
       const m = await api(`/api/listas/${encodeURIComponent(meta.id)}`);
       if (!vivo) return;
-      if (!EM_ANDAMENTO(m)) { raiz.replaceChildren(); document.title = `${titleCase(m.cidade)} · Solar Leads`; return m.status === 'erro' ? viewErro(raiz, m) : montarLista(raiz, m, 'contatos'); }
+      falhas = 0;
+      if (!EM_ANDAMENTO(m)) { raiz.replaceChildren(); document.title = `${titleCase(m.cidade)} · Solar Leads`; return m.status === 'erro' ? viewErro(raiz, m) : montarLista(raiz, m, 'contatos', qs); }
       etapa.textContent = m.etapa || (m.status === 'na_fila' ? 'Aguardando a vez na fila…' : 'Gerando…');
       titulo.textContent = m.status === 'na_fila' ? 'Sua lista está na fila' : 'Montando sua lista';
-    } catch (e) { /* tenta de novo */ }
+    } catch (e) {
+      if (!vivo) return;
+      if (e.status === 404) { avisar('Esta lista foi apagada.', 'erro'); location.hash = '#/listas'; return; }
+      falhas += 1;
+      if (falhas >= 5) {
+        cartao.replaceChildren(h('span', { class: 'vazio-ic' }, icone('alerta', 26)), h('h2', { text: 'Perdemos a conexão' }),
+          h('p', { class: 'apoio', role: 'alert', text: `Não conseguimos saber como está a lista. ${e.message}` }),
+          h('button', { class: 'btn btn-prim', type: 'button', onclick: () => rotear() }, icone('atualizar', 18), 'Tentar de novo'));
+        return;
+      }
+    }
     if (vivo) t = setTimeout(ciclo, 2000);
   }
   t = setTimeout(ciclo, 2000);
@@ -121,9 +165,10 @@ const ICONE_GRUPO = { Contato: 'telefone', Empresa: 'predio', Dono: 'pessoa', 'E
 const OCULTOS_PERFIL = new Set(['chance_dono', 'aptidao_solar', 'potencial_casa', 'potencial_empresa', 'oportunidade']);
 const OPORT = { 'Casa e empresa': { ic: 'casapredio', tom: 'verde' }, Casa: { ic: 'casa', tom: 'azul' }, Empresa: { ic: 'predio', tom: 'azul' }, 'Ampliação': { ic: 'raio', tom: 'laranja' }, 'Baixo potencial': { ic: null, tom: 'cinza' } };
 
-async function montarLista(raiz, meta, abaInicial) {
+async function montarLista(raiz, meta, abaInicial, qs) {
+  const inicial = filtrosDoHash(qs);
   const L = {
-    meta, f: filtrosPadrao(), ordem: 'relevancia', pagina: 1, atalho: 'todos', anterior: null, filtros: null,
+    meta, f: inicial.f, ordem: inicial.ordem, pagina: 1, filtros: null,
     aba: abaInicial, painelVelho: true, pessoal: null, temWhats: false,
   };
   const idUrl = encodeURIComponent(meta.id);
@@ -156,34 +201,32 @@ async function montarLista(raiz, meta, abaInicial) {
   }
   raiz.append(numeros);
 
-  /* --- atalhos e botão de filtros --- */
+  /* --- atalhos (combináveis) e botão de filtros --- */
   const barraAtalhos = h('div', { class: 'atalhos', role: 'group', 'aria-label': 'Atalhos de filtro' });
   const btnFiltros = h('button', { class: 'btn btn-sec btn-filtros', type: 'button', disabled: true, 'aria-haspopup': 'dialog' }, icone('filtro', 18), 'Filtros', h('span', { class: 'cont', hidden: true }));
+  const algoAtivo = () => !igualPadrao(L.f);
   function desenharAtalhos() {
     const temWhats = L.filtros && (L.filtros.tipo_whatsapp || []).some((o) => o.valor === 'pessoal' || o.valor === 'business');
-    barraAtalhos.replaceChildren(...ATALHOS.map((a) => {
+    const botoes = ATALHOS.map((a) => {
+      const on = a.ativo(L.f);
       const desativado = a.exigeWhats && L.filtros && !temWhats;
-      return h('button', { class: 'atalho' + (L.atalho === a.id ? ' ativo' : ''), type: 'button', 'aria-pressed': String(L.atalho === a.id), disabled: desativado, title: desativado ? 'Ainda não há números com WhatsApp verificado nesta lista' : a.dica, onclick: () => aplicarAtalho(a) }, a.rotulo);
-    }));
+      return h('button', { class: 'atalho' + (on ? ' ativo' : ''), type: 'button', 'aria-pressed': String(on), disabled: desativado, title: desativado ? 'Ainda não há números com WhatsApp verificado nesta lista' : a.dica, onclick: () => alternarAtalho(a) }, a.rotulo);
+    });
+    if (algoAtivo()) botoes.push(h('button', { class: 'atalho atalho-limpar', type: 'button', onclick: limparTudo }, icone('x', 14), 'Limpar'));
+    barraAtalhos.replaceChildren(...botoes);
   }
-  function aplicarAtalho(a) {
-    if (L.atalho === a.id && a.id !== 'todos') {
-      L.f = L.anterior ? L.anterior : filtrosPadrao(); L.anterior = null; L.atalho = igualPadrao(L.f) ? 'todos' : null;
-    } else {
-      if (L.atalho === null || L.atalho === 'todos') L.anterior = igualPadrao(L.f) ? null : copiaFiltros(L.f);
-      const so = L.f.so_disparo;
-      L.f = { ...filtrosPadrao(), ...copiaFiltros(a.filtros), so_disparo: so };
-      L.atalho = a.id; if (a.id === 'todos') L.anterior = null;
-    }
-    mudou({ sync: true, manter: true });
+  function alternarAtalho(a) {
+    if (a.ativo(L.f)) a.desliga(L.f); else a.liga(L.f);
+    mudou({ sync: true });
   }
-  raiz.append(h('div', { class: 'barra-atalhos' }, barraAtalhos, btnFiltros));
+  raiz.append(barraAtalhos);
 
   /* --- busca e ordem --- */
   const busca = h('input', { type: 'search', id: 'busca-contatos', placeholder: 'Buscar nome, empresa ou telefone…', autocomplete: 'off', 'aria-label': 'Buscar nos contatos' });
   const seletorOrdem = h('select', { id: 'ordem', 'aria-label': 'Ordenar por' }, ORDENS.map(([v, r]) => h('option', { value: v, text: r })));
   busca.addEventListener('input', debounce(() => { L.f.busca = busca.value; mudou(); }, 300));
-  seletorOrdem.addEventListener('change', () => { L.ordem = seletorOrdem.value; carregar(true); });
+  busca.value = L.f.busca; seletorOrdem.value = L.ordem;
+  seletorOrdem.addEventListener('change', () => { L.ordem = seletorOrdem.value; sincronizarHash(); carregar(true); });
 
   /* --- filtros (folha lateral) --- */
   const painelFiltros = h('aside', { class: 'filtros', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Filtros' });
@@ -265,8 +308,8 @@ async function montarLista(raiz, meta, abaInicial) {
     btnFiltros.disabled = false;
   }
   function limparTudo() {
-    L.f = filtrosPadrao(); L.atalho = 'todos'; L.anterior = null;
-    mudou({ sync: true, manter: true });
+    L.f = filtrosPadrao();
+    mudou({ sync: true });
   }
 
   /* --- chips ativos --- */
@@ -360,7 +403,7 @@ async function montarLista(raiz, meta, abaInicial) {
   }
   function mudou(op = {}) {
     if (op.sync) { sincs.forEach((f) => f()); busca.value = L.f.busca; }
-    if (!op.manter) { L.atalho = igualPadrao(L.f) ? 'todos' : null; L.anterior = null; }
+    sincronizarHash();
     L.painelVelho = true;
     desenharAtalhos(); desenharChips();
     carregar(true); carregarPessoal();
@@ -368,24 +411,28 @@ async function montarLista(raiz, meta, abaInicial) {
   }
 
   /* --- abas --- */
+  const ordemEl = h('label', { class: 'ordem', for: 'ordem' }, h('span', { class: 'so-leitor', text: 'Ordenar por' }), seletorOrdem);
+  const barraFerramentas = h('div', { class: 'barra-ferramentas' },
+    h('div', { class: 'combo combo-pilula busca-contatos' }, icone('busca', 18), busca), ordemEl, btnFiltros);
   const painelContatos = h('div', { class: 'aba-painel', id: 'painel-contatos', role: 'tabpanel', 'aria-labelledby': 'aba-contatos' },
-    h('div', { class: 'barra-ferramentas' },
-      h('div', { class: 'combo combo-pilula busca-contatos' }, icone('busca', 18), busca),
-      h('label', { class: 'ordem', for: 'ordem' }, h('span', { class: 'so-leitor', text: 'Ordenar por' }), seletorOrdem)),
-    zonaChips, resultado,
-    md.el);
+    resultado, md.el);
   const painelGeral = h('div', { class: 'aba-painel', id: 'painel-geral', role: 'tabpanel', 'aria-labelledby': 'aba-geral', hidden: true }, painelEl);
   const seg = segmentado({
     opcoes: [{ valor: 'contatos', rotulo: 'Contatos', id: 'aba-contatos', controla: 'painel-contatos' }, { valor: 'geral', rotulo: 'Visão geral', id: 'aba-geral', controla: 'painel-geral' }],
     valor: L.aba, rotulo: 'Visões da lista', papel: 'tab', classe: 'seg-abas', aoMudar: (v) => definirAba(v),
   });
+  function sincronizarHash() {
+    const q = queryDoHash(L.f, L.ordem);
+    history.replaceState(null, '', `#/lista/${idUrl}${L.aba === 'geral' ? '/painel' : ''}${q ? '?' + q : ''}`);
+  }
   function definirAba(a) {
     L.aba = a;
     painelContatos.hidden = a !== 'contatos'; painelGeral.hidden = a !== 'geral';
-    history.replaceState(null, '', `#/lista/${idUrl}${a === 'geral' ? '/painel' : ''}`);
+    ordemEl.hidden = a === 'geral';
+    sincronizarHash();
     if (a === 'geral' && (L.painelVelho || !painelEl.children.length)) carregarPainel();
   }
-  raiz.append(h('div', { class: 'abas-linha' }, seg.el), painelContatos, painelGeral);
+  raiz.append(h('div', { class: 'abas-linha' }, seg.el), barraFerramentas, zonaChips, painelContatos, painelGeral);
   desenharNumeros(); desenharAtalhos(); desenharChips(); atualizarExportar();
   definirAba(L.aba);
   carregarCampos().then(() => md.redesenhar());
@@ -439,6 +486,27 @@ function gruposDoDetalhe(linha) {
   return grupos;
 }
 
+/* ---------- resultados dos disparos ---------- */
+const RES = { opcoes: null, mapa: {} };
+const OPCOES_PADRAO = [{ valor: 'interessado', rotulo: 'Interessado' }, { valor: 'respondeu', rotulo: 'Respondeu' }, { valor: 'sem_interesse', rotulo: 'Não tem interesse' }, { valor: 'nao_e_o_dono', rotulo: 'Não é o dono' }, { valor: 'nao_entregue', rotulo: 'Não entregue' }, { valor: 'sem_resposta', rotulo: 'Sem resposta' }];
+async function opcoesResultado() {
+  if (!RES.opcoes) {
+    try { RES.opcoes = await api('/api/resultados/opcoes'); } catch (e) { RES.opcoes = OPCOES_PADRAO; }
+    RES.mapa = Object.fromEntries(RES.opcoes.map((o) => [o.valor, o.rotulo]));
+  }
+  return RES.opcoes;
+}
+function corResultado(valor, rotulo) {
+  const n = `${valor} ${rotulo || ''}`.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/_/g, ' ');
+  if (/entreg/.test(n)) return 'vermelho';
+  if (/(dono|interesse)/.test(n) && /nao|sem/.test(n)) return 'laranja';
+  if (/sem resposta/.test(n)) return 'cinza';
+  if (/interessad/.test(n)) return 'verde';
+  if (/respondeu/.test(n)) return 'azul';
+  return 'cinza';
+}
+const rotuloResultado = (v) => RES.mapa[v] || String(v).replace(/_/g, ' ');
+
 /* ---------- mestre-detalhe de contatos (usado na lista e nas pastas) ---------- */
 function sinaisDoContato(l) {
   const out = [];
@@ -447,6 +515,7 @@ function sinaisDoContato(l) {
   out.push(seloFaixa(l.faixa));
   const o = OPORT[l.oportunidade];
   if (o && o.ic) out.push(h('span', { class: 'sinal sinal-oport', title: `Oportunidade: ${l.oportunidade}`, role: 'img', 'aria-label': `Oportunidade: ${l.oportunidade}` }, icone(o.ic, 16)));
+  if (l.resultado) { const r = rotuloResultado(l.resultado); out.push(h('span', { class: `dot-res dot-${corResultado(l.resultado, r)}`, title: `Resultado: ${r}`, role: 'img', 'aria-label': `Resultado: ${r}` })); }
   const ps = Array.isArray(l.pastas) ? l.pastas : [];
   if (ps.length) { const nomes = ps.map((p) => p.nome).join(', '); out.push(h('span', { class: 'sinal sinal-pasta', title: `Em pasta: ${nomes}`, role: 'img', 'aria-label': `Em pasta: ${nomes}` }, icone('pasta', 16))); }
   return h('span', { class: 'lc-sinais' }, out);
@@ -571,6 +640,7 @@ function perfilContato(l, opc, ctx) {
       h('button', { class: 'btn btn-cinza', type: 'button', disabled: !l.telefone, onclick: async () => avisar(await copiarTexto(telBR(l.telefone)) ? 'Telefone copiado.' : 'Não foi possível copiar.') }, icone('copiar', 18), 'Copiar telefone'),
       opc.acoesExtra ? opc.acoesExtra(l, ctx) : null),
     h('div', { class: 'pf-aneis' }, aneis),
+    opc.blocoExtra ? opc.blocoExtra(l, ctx) : null,
     linhaPastas, grupos);
   requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('pronto')));
   return el;

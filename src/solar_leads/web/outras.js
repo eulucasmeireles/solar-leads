@@ -161,7 +161,20 @@ async function telaBase(raiz) {
         ajuste({ icone: 'whatsapp', tom: 'verde', titulo: 'Números verificados', valor: num(w.verificados) }),
         ajuste({ icone: 'check', tom: 'verde', titulo: 'Com WhatsApp', valor: num(w.com_whatsapp) }),
         ajuste({ icone: 'pessoa', tom: 'verde', titulo: 'Pessoais', valor: num(w.pessoais) }),
-        ajuste({ icone: 'predio', tom: 'verde', titulo: 'Comerciais', valor: num(w.comerciais) })]));
+        ajuste({ icone: 'predio', tom: 'verde', titulo: 'Comerciais', valor: num(w.comerciais) })]),
+      blocoExportacoes());
   }
   carregar();
+}
+
+/* ---------- Exportações recentes ---------- */
+function blocoExportacoes() {
+  const zona = h('div', {});
+  api('/api/exportacoes').then((itens) => {
+    const ls = (itens || []).slice(0, 20);
+    zona.replaceChildren(grupoAjustes('Exportações recentes', ls.length
+      ? ls.map((e) => ajuste({ icone: e.origem === 'pasta' ? 'pasta' : 'listas', tom: 'azul', titulo: e.descricao || (e.origem === 'pasta' ? 'Pasta' : 'Lista'), descricao: `${dataRelativa(e.quando)} · ${e.origem === 'pasta' ? 'pasta' : 'lista'}`, valor: `${num(e.contatos)} ${e.contatos === 1 ? 'contato' : 'contatos'}` }))
+      : [ajuste({ icone: 'baixar', tom: 'cinza', titulo: 'Nenhuma exportação ainda', descricao: 'Quando você exportar uma lista ou pasta, ela aparece aqui.' })]));
+  }).catch(() => { /* sem histórico neste servidor */ });
+  return zona;
 }

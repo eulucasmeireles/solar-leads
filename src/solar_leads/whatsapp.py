@@ -111,6 +111,7 @@ def checar(
     lote: int = LOTE,
     pausa_s: float = PAUSA_S,
     progresso=None,
+    contador: dict | None = None,
 ) -> dict[str, dict]:
     """Para cada número nacional (DDD+número): {tem, business, nome_business}. Usa cache.
 
@@ -127,6 +128,8 @@ def checar(
         grupo = faltam[i : i + lote]
         respostas = _consultar(grupo)
         sem_nove = {n[:2] + n[3:]: n for n in grupo if len(n) == 11 and not (respostas.get(n) or {}).get("IsInWhatsapp")}
+        if contador is not None:  # cada número consultado pesa no limite do chip, inclusive a segunda tentativa
+            contador["consultas"] = contador.get("consultas", 0) + len(grupo) + len(sem_nove)
         if sem_nove:
             time.sleep(pausa_s)
             for curto, u in _consultar(list(sem_nove)).items():
@@ -187,9 +190,13 @@ def verificar_devagar(
     con.close()
     fila = [n for n in dict.fromkeys(fila) if n not in feitos]
     avisar(f"Fila com {len(fila)} números ({len(feitos)} já conferidos).", len(fila), None)
+    contador = {"consultas": 0}
+    extras, dia = 0, datetime.now().date()  # consultas repetidas (sem o nono dígito) feitas hoje nesta execução
     while fila:
         if parar is not None and parar.is_set():
             return "Verificação interrompida."
+        if datetime.now().date() != dia:
+            extras, dia = 0, datetime.now().date()
         if not das <= datetime.now().hour < ate:
             avisar(f"Fora do horário ({das}h às {ate}h); aguardando.", len(fila), None)
             if dormir(600):
@@ -198,6 +205,7 @@ def verificar_devagar(
         con = cnpj_db.conectar()
         try:
             hoje = con.execute("SELECT count(*) FROM whatsapp_tipo WHERE verificado_em::DATE = current_date").fetchone()[0]
+            hoje += extras
             if hoje >= limite_dia:
                 con.close()
                 avisar(f"Limite de {limite_dia} verificações do dia atingido; continua amanhã.", len(fila), hoje)
@@ -206,7 +214,9 @@ def verificar_devagar(
                 continue
             grupo = fila[: random.randint(lote_min, lote_max)]
             fila = fila[len(grupo) :]
-            checar(con, grupo, lote=len(grupo), pausa_s=random.uniform(4, 9))
+            contador["consultas"] = 0
+            checar(con, grupo, lote=len(grupo), pausa_s=random.uniform(4, 9), contador=contador)
+            extras += max(0, contador["consultas"] - len(grupo))
         except WhatsAppIndisponivel as e:
             return f"Parou: {e}"
         finally:

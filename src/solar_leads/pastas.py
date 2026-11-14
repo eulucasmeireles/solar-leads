@@ -40,10 +40,17 @@ def _con() -> sqlite3.Connection:
           resultado TEXT NOT NULL DEFAULT '', dados TEXT NOT NULL,
           PRIMARY KEY (pasta_id, telefone));
         CREATE INDEX IF NOT EXISTS pasta_contatos_tel ON pasta_contatos (telefone);
+        CREATE TABLE IF NOT EXISTS exportacoes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, quando TEXT NOT NULL, origem TEXT NOT NULL, ref TEXT NOT NULL,
+          descricao TEXT NOT NULL, contatos INTEGER NOT NULL, ip TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS nao_contatar (
           telefone TEXT PRIMARY KEY, motivo TEXT NOT NULL DEFAULT '', criado_em TEXT NOT NULL);
         """
     )
+    try:  # coluna acrescentada depois da primeira versão
+        con.execute("ALTER TABLE pasta_contatos ADD COLUMN resultado_em TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
     return con
 
 
@@ -65,7 +72,9 @@ def listar() -> list[dict]:
         linhas = con.execute(
             """
             SELECT p.id, p.nome, p.criada_em, count(c.telefone) AS contatos,
-                   (SELECT group_concat(DISTINCT cidade) FROM pasta_contatos WHERE pasta_id = p.id) AS cidades
+                   (SELECT group_concat(DISTINCT cidade) FROM pasta_contatos WHERE pasta_id = p.id) AS cidades,
+                   (SELECT count(*) FROM exportacoes WHERE origem = 'pasta' AND ref = CAST(p.id AS TEXT)) AS exportacoes,
+                   (SELECT max(quando) FROM exportacoes WHERE origem = 'pasta' AND ref = CAST(p.id AS TEXT)) AS ultima_exportacao
             FROM pastas p LEFT JOIN pasta_contatos c ON c.pasta_id = p.id
             GROUP BY p.id ORDER BY p.criada_em DESC, p.id DESC
             """
@@ -209,3 +218,112 @@ def copia_de_seguranca(pasta_destino, manter: int = 14) -> str:
     for velho in sorted(destino.glob("pastas-*.sqlite"))[:-manter]:
         velho.unlink()
     return str(arquivo)
+
+
+# ---- Resultados dos disparos ----
+# O que aconteceu com cada contato depois do envio. É o retorno que permite medir
+# se a pontuação acerta: quem respondeu mais, os contatos fortes ou os médios?
+
+RESULTADOS = [
+    ("interessado", "Interessado"),
+    ("respondeu", "Respondeu"),
+    ("nao_quer", "Não tem interesse"),
+    ("nao_e_o_dono", "Não é o dono"),
+    ("nao_entregue", "Não entregue"),
+    ("sem_resposta", "Sem resposta"),
+]
+_ROTULO = dict(RESULTADOS)
+RESPONDEU = {"interessado", "respondeu", "nao_quer", "nao_e_o_dono"}
+_FORCA = {"A": "Contato forte", "B": "Contato médio", "C": "Fraco"}
+_WHATS = {"pessoal": "WhatsApp pessoal", "business": "WhatsApp comercial", "": "Não verificado"}
+
+
+def marcar_resultado(
+    pasta_id: int, resultado: str, telefones_e164: list[str] | None = None, todos_sem_resultado: bool = False
+) -> tuple[int, int, list[str]]:
+    """Grava o resultado. Devolve (marcados, números que não estão na pasta, telefones marcados)."""
+    if resultado and resultado not in _ROTULO:
+        raise PastaInvalida("Resultado desconhecido.")
+    agora = _agora() if resultado else ""
+    with closing(_con()) as con, con:
+        na_pasta = {l[0] for l in con.execute("SELECT telefone FROM pasta_contatos WHERE pasta_id = ?", [pasta_id]).fetchall()}
+        if todos_sem_resultado:
+            alvo = [l[0] for l in con.execute(
+                "SELECT telefone FROM pasta_contatos WHERE pasta_id = ? AND resultado = ''", [pasta_id]).fetchall()]
+            fora = 0
+        else:
+            pedidos = list(dict.fromkeys(telefones_e164 or []))
+            alvo = [t for t in pedidos if t in na_pasta]
+            fora = len(pedidos) - len(alvo)
+        con.executemany(
+            "UPDATE pasta_contatos SET resultado = ?, resultado_em = ? WHERE pasta_id = ? AND telefone = ?",
+            [(resultado, agora, pasta_id, t) for t in alvo],
+        )
+    return len(alvo), fora, alvo
+
+
+def resumo_resultados(pasta_id: int | None = None) -> dict:
+    """Totais e taxas de resposta, de uma pasta ou de todas, quebrados por força, oportunidade e WhatsApp."""
+    with closing(_con()) as con:
+        if pasta_id is None:
+            linhas = con.execute("SELECT resultado, dados FROM pasta_contatos").fetchall()
+        else:
+            linhas = con.execute("SELECT resultado, dados FROM pasta_contatos WHERE pasta_id = ?", [pasta_id]).fetchall()
+    por_resultado: dict[str, int] = {}
+    grupos: dict[str, dict[str, list[int]]] = {"forca": {}, "oportunidade": {}, "whatsapp": {}}
+    for l in linhas:
+        if not l["resultado"]:
+            continue
+        por_resultado[l["resultado"]] = por_resultado.get(l["resultado"], 0) + 1
+        d = json.loads(l["dados"])
+        chaves = {
+            "forca": d.get("faixa") or "",
+            "oportunidade": d.get("oportunidade") or "",
+            "whatsapp": d.get("tipo_whatsapp") or "",
+        }
+        for grupo, valor in chaves.items():
+            g = grupos[grupo].setdefault(valor, [0, 0, 0])  # enviados, responderam, interessados
+            g[0] += 1
+            g[1] += l["resultado"] in RESPONDEU
+            g[2] += l["resultado"] == "interessado"
+    com_resultado = sum(por_resultado.values())
+    responderam = sum(n for r, n in por_resultado.items() if r in RESPONDEU)
+
+    def tabela(grupo: str, rotulos: dict[str, str] | None = None) -> list[dict]:
+        return [
+            {
+                "valor": v, "rotulo": (rotulos or {}).get(v, v or "Não informado"), "enviados": e, "responderam": r,
+                "interessados": i, "taxa": round(100 * r / e, 1) if e else None,
+            }
+            for v, (e, r, i) in sorted(grupos[grupo].items(), key=lambda x: -x[1][0])
+        ]
+
+    return {
+        "total": len(linhas),
+        "com_resultado": com_resultado,
+        "responderam": responderam,
+        "interessados": por_resultado.get("interessado", 0),
+        "taxa_resposta": round(100 * responderam / com_resultado, 1) if com_resultado else None,
+        "por_resultado": [{"valor": v, "rotulo": r, "n": por_resultado[v]} for v, r in RESULTADOS if v in por_resultado],
+        "grupos": {"forca": tabela("forca", _FORCA), "oportunidade": tabela("oportunidade"), "whatsapp": tabela("whatsapp", _WHATS)},
+    }
+
+
+# ---- Histórico de exportações ----
+
+def registrar_exportacao(origem: str, ref: str, descricao: str, contatos: int, ip: str = "") -> None:
+    with closing(_con()) as con, con:
+        con.execute(
+            "INSERT INTO exportacoes (quando, origem, ref, descricao, contatos, ip) VALUES (?, ?, ?, ?, ?, ?)",
+            [_agora(), origem, ref, descricao[:200], contatos, ip[:60]],
+        )
+
+
+def exportacoes_recentes(limite: int = 20) -> list[dict]:
+    with closing(_con()) as con:
+        return [
+            dict(l)
+            for l in con.execute(
+                "SELECT quando, origem, descricao, contatos FROM exportacoes ORDER BY id DESC LIMIT ?", [limite]
+            ).fetchall()
+        ]
