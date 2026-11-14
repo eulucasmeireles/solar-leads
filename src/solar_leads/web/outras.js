@@ -1,0 +1,167 @@
+'use strict';
+/* Solar Leads - telas WhatsApp e Base de dados (cartões no estilo Ajustes) */
+
+function grupoAjustes(titulo, linhas, rodape) {
+  return h('section', { class: 'ajustes' }, titulo ? h('h2', { class: 'ajustes-tit', text: titulo }) : null,
+    h('div', { class: 'cartao cartao-ajustes' }, linhas), rodape ? h('p', { class: 'ajustes-rodape', text: rodape }) : null);
+}
+
+/* ---------- WhatsApp ---------- */
+async function telaWhatsapp(raiz) {
+  document.title = 'WhatsApp · Solar Leads';
+  const rota = app.rota;
+  const S = { w: null, qr: null, gerandoQr: false, erroQr: '', listas: [], timer: null, timerQr: null, vivo: true };
+  const zonaEstado = h('div', {}, h('div', { class: 'cartao' }, h('div', { class: 'sk-pilha' }, esqueleto('40%', '22px'), esqueleto('70%', '14px'), esqueleto('100%', '56px'))));
+  const zonaConexao = h('div', { hidden: true });
+  const zonaVerif = h('div', {});
+  const live = h('div', { class: 'so-leitor', 'aria-live': 'polite' });
+  aoSair(() => { S.vivo = false; clearTimeout(S.timer); clearInterval(S.timerQr); });
+
+  const aviso = h('div', { class: 'nota nota-laranja', role: 'note' }, icone('alerta', 20),
+    h('div', {}, h('strong', { text: 'Use um chip que você aceite perder.' }), h('p', { text: 'Consultas em massa podem levar o WhatsApp a bloquear o número. Nunca conecte o número da API oficial.' })));
+
+  function desenharEstado() {
+    const w = S.w, on = Boolean(w && w.disponivel), t = (w && w.totais) || {};
+    const dado = (k, r) => h('div', { class: 'mini-num' }, h('div', { class: 'mini-num-v', text: t[k] == null ? '—' : num(t[k]) }), h('div', { class: 'mini-num-r', text: r }));
+    zonaEstado.replaceChildren(h('section', { class: 'cartao' },
+      ajuste({ icone: 'whatsapp', tom: on ? 'verde' : 'cinza', titulo: on ? 'Conectado' : 'Não conectado',
+        descricao: on ? (w.conta ? `Conta ${w.conta}` : 'Pronto para verificar números') : (w && w.motivo) || 'Nenhum WhatsApp conectado.',
+        valor: h('span', { class: `status-ponto ${on ? 'on' : ''}`, 'aria-hidden': 'true' }) }),
+      h('div', { class: 'mini-nums' }, dado('verificados', 'verificados'), dado('com_whatsapp', 'com WhatsApp'), dado('pessoais', 'pessoais'), dado('comerciais', 'comerciais'))));
+  }
+
+  function desenharConexao() {
+    const on = Boolean(S.w && S.w.disponivel);
+    zonaConexao.hidden = on;
+    if (on) { clearInterval(S.timerQr); S.qr = null; zonaConexao.replaceChildren(); return; }
+    const corpo = [h('div', {}, h('h2', { text: 'Conectar o WhatsApp' }), h('p', { class: 'apoio', text: 'Leia o código com o celular do chip que será usado nas consultas.' }))];
+    if (S.qr) {
+      corpo.push(h('div', { class: 'qr-area' },
+        h('img', { class: 'qr', src: S.qr, alt: 'QR code para conectar o WhatsApp', width: 232, height: 232 }),
+        h('ol', { class: 'passos' },
+          h('li', {}, 'Abra o WhatsApp no celular.'),
+          h('li', {}, 'Vá em ', h('strong', { text: 'WhatsApp > Aparelhos conectados > Conectar um aparelho' }), '.'),
+          h('li', {}, 'Aponte a câmera para este código.'),
+          h('li', { class: 'mudo', text: 'O código se renova a cada 20 segundos. Avisamos aqui quando conectar.' }))));
+    } else {
+      corpo.push(h('div', {}, h('button', { class: 'btn btn-prim', type: 'button', disabled: S.gerandoQr, onclick: gerarQr }, S.gerandoQr ? h('i', { class: 'giro', 'aria-hidden': 'true' }) : icone('sparkle', 18), S.gerandoQr ? 'Gerando…' : 'Gerar QR code')));
+      if (S.erroQr) corpo.push(h('p', { class: 'erro-inline', role: 'alert', text: S.erroQr }));
+    }
+    zonaConexao.replaceChildren(h('section', { class: 'cartao cartao-qr' }, corpo));
+  }
+
+  async function gerarQr() {
+    S.gerandoQr = true; S.erroQr = ''; desenharConexao();
+    try {
+      const r = await api('/api/whatsapp/qr', { method: 'POST' });
+      if (!S.vivo) return;
+      S.qr = r.qr; S.gerandoQr = false; desenharConexao(); agendar(true);
+      clearInterval(S.timerQr);
+      S.timerQr = setInterval(async () => {
+        if (S.w && S.w.disponivel) { clearInterval(S.timerQr); return; }
+        try { const n = await api('/api/whatsapp/qr', { method: 'POST' }); if (S.vivo) { S.qr = n.qr; desenharConexao(); } } catch (e) { if (e.status === 409) atualizar(); }
+      }, 20000);
+    } catch (e) {
+      S.gerandoQr = false;
+      if (e.status === 409) { await atualizar(); return; }
+      S.erroQr = e.message; desenharConexao();
+    }
+  }
+
+  function desenharVerificacao() {
+    const w = S.w, v = (w && w.verificacao) || {}, on = Boolean(w && w.disponivel);
+    const ritmo = 'Ritmo lento de propósito, para proteger o chip: cerca de 360 números por hora, das 8h às 20h, até 3.000 por dia.';
+    if (v.rodando) {
+      const lista = S.listas.find((m) => m.id === v.lista_id);
+      const quanto = Math.min(100, (v.feitos_hoje || 0) / 3000 * 100);
+      zonaVerif.replaceChildren(h('section', { class: 'cartao' },
+        ajuste({ icone: 'sparkle', tom: 'laranja', titulo: 'Verificando números', descricao: lista ? `Lista de ${cidadeUF(lista)}` : 'Em andamento', valor: selo('Rodando', 'laranja', { ponto: true }) }),
+        h('div', { class: 'verif-roda' },
+          h('div', { class: 'mini-nums' },
+            h('div', { class: 'mini-num' }, h('div', { class: 'mini-num-v', text: num(v.feitos_hoje) }), h('div', { class: 'mini-num-r', text: 'feitos hoje' })),
+            h('div', { class: 'mini-num' }, h('div', { class: 'mini-num-v', text: v.restantes == null ? '—' : num(v.restantes) }), h('div', { class: 'mini-num-r', text: 'restantes' }))),
+          progresso(quanto, 'Verificações feitas hoje'),
+          h('p', { class: 'apoio-peq', text: `${num(v.feitos_hoje)} de 3.000 permitidos hoje` }),
+          v.mensagem ? h('p', { class: 'verif-msg', text: v.mensagem }) : null,
+          h('div', {}, h('button', { class: 'btn btn-perigo', type: 'button', onclick: parar }, icone('parar', 18), 'Parar')),
+          h('p', { class: 'dica', text: ritmo }))));
+      return;
+    }
+    const prontas = S.listas.filter((m) => m.status === 'pronta');
+    const sel = h('select', { id: 'sel-lista', disabled: !on || !prontas.length }, prontas.map((m) => h('option', { value: m.id, text: `${cidadeUF(m)} · ${num(m.resumo ? m.resumo.contatos_para_disparo : 0)} contatos` })));
+    const botao = h('button', { class: 'btn btn-prim', type: 'button', disabled: !on || !prontas.length, onclick: () => iniciar(sel.value, botao) }, 'Iniciar verificação lenta');
+    const motivo = !on ? 'Conecte um WhatsApp para poder verificar.' : !prontas.length ? 'Gere uma lista primeiro.' : '';
+    zonaVerif.replaceChildren(h('section', { class: 'cartao' },
+      ajuste({ icone: 'sparkle', tom: 'azul', titulo: 'Verificar números', descricao: 'Descobre quais números têm WhatsApp e se são pessoais ou comerciais.' }),
+      v.mensagem ? h('p', { class: 'verif-msg', text: v.mensagem }) : null,
+      h('div', { class: 'campo' }, h('label', { for: 'sel-lista', text: 'Lista para verificar' }), sel),
+      h('div', { class: 'linha-botoes' }, botao, motivo ? h('span', { class: 'dica', text: motivo }) : null),
+      h('p', { class: 'dica' }, ritmo)));
+  }
+
+  async function iniciar(id, botao) {
+    botao.disabled = true;
+    try { await api('/api/whatsapp/verificacao', { method: 'POST', corpo: { lista_id: id } }); avisar('Verificação iniciada.'); await atualizar(); }
+    catch (e) { avisar(e.message, 'erro'); botao.disabled = false; }
+  }
+  async function parar() {
+    try { await api('/api/whatsapp/verificacao', { method: 'DELETE' }); avisar('Verificação parada.'); await atualizar(); } catch (e) { avisar(e.message, 'erro'); }
+  }
+
+  async function atualizar() {
+    try {
+      const antes = S.w && S.w.disponivel;
+      S.w = await api('/api/whatsapp');
+      if (!S.vivo) return;
+      if (S.w.disponivel && !antes && S.qr !== null) live.textContent = 'WhatsApp conectado.';
+      desenharEstado(); desenharConexao(); desenharVerificacao();
+      if (S.w.verificacao && S.w.verificacao.mensagem && S.w.verificacao.rodando) live.textContent = S.w.verificacao.mensagem;
+    } catch (e) {
+      if (!S.w) zonaEstado.replaceChildren(estadoErro(e.message, atualizar));
+    }
+    agendar();
+  }
+  function agendar(forcar) {
+    clearTimeout(S.timer);
+    const preciso = forcar || (S.qr && !(S.w && S.w.disponivel)) || (S.w && S.w.verificacao && S.w.verificacao.rodando);
+    if (S.vivo && preciso) S.timer = setTimeout(atualizar, 3000);
+  }
+
+  raiz.append(cabecalhoPagina('WhatsApp', 'Descubra quais números têm WhatsApp antes de disparar.'), live, zonaEstado, zonaConexao, aviso, zonaVerif);
+  try { S.listas = await api('/api/listas'); } catch (e) { S.listas = []; }
+  if (rota !== app.rota) return;
+  await atualizar();
+}
+
+/* ---------- Base de dados ---------- */
+async function telaBase(raiz) {
+  document.title = 'Base de dados · Solar Leads';
+  const rota = app.rota;
+  const corpo = h('div', { class: 'ajustes-pilha' }, Array.from({ length: 3 }, () => h('div', { class: 'cartao', 'aria-hidden': 'true' }, esqueleto('50%', '22px'), esqueleto('100%', '70px'))));
+  raiz.append(cabecalhoPagina('Base de dados', 'De onde vêm os contatos e quando cada fonte foi atualizada.'), corpo);
+  async function carregar() {
+    let b;
+    try { b = await api('/api/base'); } catch (e) { if (rota === app.rota) corpo.replaceChildren(estadoErro(e.status === 404 ? 'Os dados da base ainda não estão disponíveis neste servidor.' : e.message, carregar)); return; }
+    if (rota !== app.rota) return;
+    const r = b.receita || {}, a = b.aneel, w = b.whatsapp || {};
+    corpo.replaceChildren(
+      grupoAjustes('Receita Federal', [
+        ajuste({ icone: 'predio', tom: 'azul', titulo: 'Base de CNPJ', descricao: 'Mês da base', valor: r.mes ? mesBR(r.mes) : '—' }),
+        ajuste({ icone: 'base', tom: 'azul', titulo: 'Estabelecimentos', valor: num(r.estabelecimentos) }),
+        ajuste({ icone: 'listas', tom: 'azul', titulo: 'Empresas', valor: num(r.empresas) }),
+        ajuste({ icone: 'pessoa', tom: 'azul', titulo: 'Sócios', valor: num(r.socios) }),
+        ajuste({ icone: 'pin', tom: 'azul', titulo: 'Municípios cobertos', valor: num(b.municipios) })]),
+      grupoAjustes('ANEEL', a ? [
+        ajuste({ icone: 'sol', tom: 'laranja', titulo: 'Última atualização', valor: dataBR(a.atualizado_em) }),
+        ajuste({ icone: 'raio', tom: 'laranja', titulo: 'Sistemas instalados', valor: num(a.sistemas) }),
+        ajuste({ icone: 'predio', tom: 'laranja', titulo: 'Empresas com energia solar', valor: num(a.empresas_com_solar) })]
+        : [ajuste({ icone: 'sol', tom: 'laranja', titulo: 'Ainda não carregada', descricao: 'Sem registros da ANEEL na base.' })],
+        'O portal da ANEEL só aceita acesso do Brasil; a atualização precisa de um túnel pelo seu computador.'),
+      grupoAjustes('WhatsApp', [
+        ajuste({ icone: 'whatsapp', tom: 'verde', titulo: 'Números verificados', valor: num(w.verificados) }),
+        ajuste({ icone: 'check', tom: 'verde', titulo: 'Com WhatsApp', valor: num(w.com_whatsapp) }),
+        ajuste({ icone: 'pessoa', tom: 'verde', titulo: 'Pessoais', valor: num(w.pessoais) }),
+        ajuste({ icone: 'predio', tom: 'verde', titulo: 'Comerciais', valor: num(w.comerciais) })]));
+  }
+  carregar();
+}

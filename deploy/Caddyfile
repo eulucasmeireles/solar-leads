@@ -1,0 +1,13 @@
+# Publica o sistema web com HTTPS. O sistema em si só escuta em 127.0.0.1:8787 e exige login.
+141-148-128-13.sslip.io {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		X-Robots-Tag "noindex, nofollow"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8787
+}

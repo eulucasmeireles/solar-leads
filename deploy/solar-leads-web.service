@@ -1,0 +1,13 @@
+[Unit]
+Description=Solar Leads - sistema web (porta 8787, apenas localhost)
+After=network.target
+
+[Service]
+WorkingDirectory=/home/ubuntu/projetos/solar-leads
+ExecStart=/home/ubuntu/projetos/solar-leads/.venv/bin/leads web
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Entrar · Solar Leads</title>
+  <style>
+    @font-face { font-family: "Inter"; src: url("/static/fonts/inter-var.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+    :root { --fundo: #fff; --apoio: #f5f5f7; --texto: #1d1d1f; --cinza: #6e6e73; --linha: #e8e8ed; --azul: #0071e3; --erro: #c5221f; --erro-fundo: #fce8e6; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body { font-family: "Inter", -apple-system, "SF Pro Text", system-ui, sans-serif; background: var(--fundo); color: var(--texto);
+      display: grid; place-items: center; padding: 24px; position: relative; overflow: hidden; }
+    body::before { content: ""; position: absolute; inset: -20% -10% auto; height: 70%; z-index: -1; filter: blur(80px); opacity: .55;
+      background: radial-gradient(closest-side at 30% 55%, #ffd9b8, transparent), radial-gradient(closest-side at 55% 35%, #fff1b8, transparent), radial-gradient(closest-side at 75% 60%, #e3dfff, transparent); }
+    main { width: min(380px, 100%); display: grid; gap: 20px; text-align: center; }
+    .marca { display: inline-flex; gap: 8px; align-items: center; justify-content: center; font-weight: 600; font-size: 15px; }
+    .marca svg { color: #e8890c; }
+    h1 { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 0; }
+    p { margin: 0; color: var(--cinza); font-size: 15px; }
+    form { display: grid; gap: 12px; margin-top: 8px; }
+    label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    input { font: inherit; font-size: 16px; height: 52px; padding: 0 18px; border-radius: 14px; border: 1px solid var(--linha); background: var(--fundo);
+      box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.05); outline: none; width: 100%; }
+    input:focus-visible { border-color: var(--azul); box-shadow: 0 0 0 4px rgba(0,113,227,.18); }
+    button { font: inherit; font-weight: 600; font-size: 16px; height: 52px; border: 0; border-radius: 999px; background: var(--texto); color: #fff; cursor: pointer; transition: background .15s; }
+    button:hover { background: #000; }
+    button:focus-visible { outline: 3px solid rgba(0,113,227,.5); outline-offset: 2px; }
+    button[disabled] { opacity: .6; cursor: default; }
+    .erro { color: var(--erro); background: var(--erro-fundo); border-radius: 12px; padding: 10px 14px; font-size: 14px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="marca">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      Solar Leads
+    </div>
+    <h1>Entrar</h1>
+    <p>Digite a senha para abrir o sistema.</p>
+    <form id="form" novalidate>
+      <label for="senha">Senha</label>
+      <input id="senha" name="senha" type="password" autocomplete="current-password" placeholder="Senha" required autofocus>
+      <div class="erro" id="erro" role="alert" hidden></div>
+      <button id="entrar" type="submit">Entrar</button>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById('form'), erro = document.getElementById('erro'), botao = document.getElementById('entrar');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      erro.hidden = true; botao.disabled = true; botao.textContent = 'Entrando…';
+      try {
+        const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ senha: document.getElementById('senha').value }) });
+        if (r.ok) { location.href = '/'; return; }
+        let d = null; try { d = await r.json(); } catch (x) { /* sem corpo */ }
+        erro.textContent = (d && d.detail) || 'Não foi possível entrar. Tente de novo.';
+      } catch (x) { erro.textContent = 'Sem conexão com o servidor. Tente de novo.'; }
+      erro.hidden = false; botao.disabled = false; botao.textContent = 'Entrar';
+    });
+  </script>
+</body>
+</html>

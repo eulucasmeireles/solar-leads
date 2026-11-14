@@ -1,0 +1,71 @@
+name: solar-leads
+
+# Tudo escuta só em 127.0.0.1. Para abrir no navegador do Mac, use túnel SSH:
+#   ssh -N -L 4000:localhost:4000 -L 8080:localhost:8080 oracle
+
+services:
+  evolution-go:
+    image: evoapicloud/evolution-go:0.7.3
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      SERVER_PORT: 4000
+      CLIENT_NAME: evolution
+      GLOBAL_API_KEY: ${EVOGO_API_KEY}
+      POSTGRES_AUTH_DB: postgresql://postgres:${EVOGO_PG_PASSWORD}@evogo-postgres:5432/evogo_auth?sslmode=disable
+      POSTGRES_USERS_DB: postgresql://postgres:${EVOGO_PG_PASSWORD}@evogo-postgres:5432/evogo_users?sslmode=disable
+      DATABASE_SAVE_MESSAGES: "false"
+      WADEBUG: INFO
+      LOGTYPE: console
+      CONNECT_ON_STARTUP: "true"
+      EVENT_IGNORE_STATUS: "true"
+    volumes:
+      - evogo_data:/app/dbdata
+    depends_on:
+      evogo-postgres:
+        condition: service_healthy
+
+  evogo-postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${EVOGO_PG_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - evogo_pg:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  gmaps:
+    image: gosom/google-maps-scraper:v1.18.2
+    restart: unless-stopped
+    command: ["-data-folder", "/gmapsdata"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      DISABLE_TELEMETRY: "1"
+    volumes:
+      - gmaps_data:/gmapsdata
+
+  # Porta de entrada pública (80/443) com certificado automático; repassa para o sistema web local.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  evogo_data:
+  evogo_pg:
+  gmaps_data:
+  caddy_data:
+  caddy_config:

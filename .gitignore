@@ -1,0 +1,7 @@
+dados/
+saida/
+.env
+.venv/
+__pycache__/
+*.pyc
+senha-do-sistema.txt
