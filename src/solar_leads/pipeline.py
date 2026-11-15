@@ -86,6 +86,22 @@ INTEIRAS = ("ordem", "aptidao_solar", "chance_dono", "potencial_casa", "potencia
 
 PORTE = {"01": "Microempresa", "03": "Pequeno porte", "05": "Médio ou grande"}
 
+# Para quem a lista vai ser usada. "dono": oferecer energia solar ao dono (casa ou empresa dele).
+# "empresa": oferecer outra coisa para a empresa; aí as notas de solar não dizem nada.
+PUBLICOS = ("dono", "empresa")
+# Colunas que só fazem sentido no público "dono": ficam fora da tela e do CSV no público "empresa".
+SO_DO_DONO = frozenset(
+    c for c, _, _, grupo, _ in CAMPOS if grupo == "Energia solar"
+) | {"oportunidade", "aptidao_solar", "potencial_casa", "motivos_casa", "potencial_empresa", "motivos_solar"}
+
+
+def chaves_do_publico(publico: str) -> list[str]:
+    return [c for c in CHAVES if publico != "empresa" or c not in SO_DO_DONO]
+
+
+def cabecalhos_do_publico(publico: str) -> list[str]:
+    return [cab for c, cab, *_ in CAMPOS if publico != "empresa" or c not in SO_DO_DONO]
+
 
 @lru_cache(maxsize=4096)
 def slug(texto: str) -> str:
@@ -113,6 +129,7 @@ def montar(
     tem_whatsapp: dict[str, dict] | None = None,
     so_pessoal: bool = False,
     min_aptidao: int = 0,
+    publico: str = "dono",
 ) -> tuple[list[dict], list[dict]]:
     """Devolve (todas as linhas, em ordem de prioridade; as linhas para disparo, sem repetidos)."""
     linhas = [enriquecer.escolher_telefone(l, tem_whatsapp, so_pessoal) for l in leads]
@@ -127,13 +144,27 @@ def montar(
             l["solar"] = "outra empresa do dono tem"
     for l in linhas:
         l["porte"] = PORTE.get((l["porte"] or "").strip().zfill(2), "") if l["porte"] else ""
+    ordenar(linhas, cidade, publico)
+    disparo = sem_repetidos([l for l in linhas if l["faixa"] in ("A", "B") and l["telefone"]])
+    return linhas, disparo
+
+
+def ordenar(linhas: list[dict], cidade: str, publico: str = "dono") -> None:
+    """Põe as linhas em ordem de prioridade e refaz as etiquetas, conforme o público da lista.
+
+    Nos dois públicos vem primeiro quem tem WhatsApp confirmado (sem WhatsApp não há contato) e,
+    dentro de cada faixa, quem está no Maps e o CNPJ ativo. No público "dono" o desempate seguinte
+    é o potencial solar; no público "empresa" ele não entra, e as etiquetas não falam de solar.
+    """
+    if publico not in PUBLICOS:
+        raise ValueError(f"Público desconhecido: {publico}")
+    dono = publico == "dono"
+    for l in linhas:
         l["tags"] = ",".join(
-            ["solar", f"faixa-{l['faixa'].lower()}", slug(cidade or l["cidade"]), f"fonte-{slug(l['fonte'])}"]
+            ["solar" if dono else "empresas", f"faixa-{l['faixa'].lower()}", slug(cidade or l["cidade"]), f"fonte-{slug(l['fonte'])}"]
             + ([f"cnpj-{l['situacao']}"] if l["situacao"] else [])
-            + (["ja-tem-solar"] if l["solar"] not in ("sem registro", "dono: indício fraco") else [])
+            + (["ja-tem-solar"] if dono and l["solar"] not in ("sem registro", "dono: indício fraco") else [])
         )
-    # Antes de tudo, quem tem WhatsApp confirmado: sem WhatsApp não há contato.
-    # Depois, dentro de cada faixa: quem está no Maps, CNPJ ativo, e por fim os encerrados.
     linhas.sort(
         key=lambda l: (
             l["faixa"] == "C",
@@ -141,15 +172,22 @@ def montar(
             "ABC".index(l["faixa"]),
             l["fonte"] != "Google Maps",
             l["situacao"] not in ("ativa", ""),
-            -l["aptidao_solar"],
-            -l["chance_dono"],
+            -int(l["aptidao_solar"] or 0) if dono else 0,
+            -int(l["chance_dono"] or 0),
             l["cnpj"],
         )
     )
     for i, l in enumerate(linhas):
         l["ordem"] = i
-    disparo = sem_repetidos([l for l in linhas if l["faixa"] in ("A", "B") and l["telefone"]])
-    return linhas, disparo
+
+
+def trocar_publico(arquivo: Path | str, cidade: str, publico: str) -> None:
+    """Reordena e reetiqueta uma lista já gravada. Não mexe em telefones nem em notas."""
+    cur = duckdb.connect().execute(f"SELECT * FROM read_parquet('{arquivo}')")
+    nomes = [d[0] for d in cur.description]
+    linhas = [dict(zip(nomes, l)) for l in cur.fetchall()]
+    ordenar(linhas, cidade, publico)
+    salvar_parquet(linhas, arquivo)
 
 
 def _contar(conjunto: list[dict], campo: str) -> dict[str, int]:

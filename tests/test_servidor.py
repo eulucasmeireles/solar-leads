@@ -278,7 +278,7 @@ def test_campos_devolve_todos_os_campos_do_pipeline(logado):
     assert r.status_code == 200
     dados = r.json()
     assert [d["chave"] for d in dados] == pipeline.CHAVES
-    assert {"chave", "rotulo", "grupo", "tipo"} == set(dados[0])
+    assert {"chave", "rotulo", "grupo", "tipo", "so_dono"} == set(dados[0])
 
 
 @pytest.mark.parametrize("q", ["", "a", " a ", "  "])

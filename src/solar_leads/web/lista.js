@@ -6,7 +6,7 @@ const mesmo = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
 const tem = (arr, v) => arr.includes(v);
 const sem = (arr, v) => arr.filter((x) => x !== v);
 /* atalhos combináveis: cada um liga e desliga o próprio conjunto de filtros */
-const ATALHOS = [
+const ATALHOS_BASE = [
   { id: 'whats', rotulo: 'Com WhatsApp', dica: 'Só quem tem WhatsApp confirmado (pessoal ou comercial)', exigeWhats: true,
     ativo: (f) => mesmo(f.tipo_whatsapp, ['pessoal', 'business']), liga: (f) => { f.tipo_whatsapp = ['pessoal', 'business']; }, desliga: (f) => { f.tipo_whatsapp = []; } },
   { id: 'melhores', rotulo: 'Melhores contatos', dica: 'CNPJ ativo, contato forte, potencial 4 ou mais e sem energia solar',
@@ -21,9 +21,23 @@ const ATALHOS = [
     ativo: (f) => mesmo(f.solar, ['sem registro']), liga: (f) => { f.solar = ['sem registro']; }, desliga: (f) => { f.solar = []; } },
   { id: 'ja-tem', rotulo: 'Já têm solar', dica: 'A empresa, outra unidade ou outra empresa do dono já tem',
     ativo: (f) => mesmo(f.solar, SOLAR_JA_TEM), liga: (f) => { f.solar = SOLAR_JA_TEM.slice(); }, desliga: (f) => { f.solar = []; } },
+  { id: 'comercial', rotulo: 'WhatsApp comercial', dica: 'Só números com WhatsApp comercial (conta business)', exigeWhats: true,
+    ativo: (f) => mesmo(f.tipo_whatsapp, ['business']), liga: (f) => { f.tipo_whatsapp = ['business']; }, desliga: (f) => { f.tipo_whatsapp = []; } },
   { id: 'fora', rotulo: 'Fora de pastas', dica: 'Contatos que ainda não estão em nenhuma pasta',
     ativo: (f) => f.pasta === 'fora', liga: (f) => { f.pasta = 'fora'; }, desliga: (f) => { f.pasta = ''; } },
 ];
+/* atalhos de solar somem no público "empresa"; "Melhores contatos" ali não usa potencial nem solar */
+const ATALHOS_SO_DONO = ['casa', 'sem-solar', 'ja-tem'];
+const MELHORES_EMPRESA = {
+  dica: 'CNPJ ativo e contato forte',
+  ativo: (f) => tem(f.situacao, 'ativa') && tem(f.faixa, 'A'),
+  liga: (f) => { if (!tem(f.situacao, 'ativa')) f.situacao.push('ativa'); if (!tem(f.faixa, 'A')) f.faixa.push('A'); },
+  desliga: (f) => { f.situacao = sem(f.situacao, 'ativa'); f.faixa = sem(f.faixa, 'A'); },
+};
+function atalhosDaLista(meta) {
+  if (!publicoEmpresa(meta)) return ATALHOS_BASE.filter((a) => a.id !== 'comercial');
+  return ATALHOS_BASE.filter((a) => !ATALHOS_SO_DONO.includes(a.id)).map((a) => (a.id === 'melhores' ? { ...a, ...MELHORES_EMPRESA } : a));
+}
 const ORDENS = [['relevancia', 'Mais relevantes'], ['aptidao', 'Maior potencial'], ['chance', 'Maior chance de ser o dono'], ['nome', 'Nome (A a Z)'], ['empresa', 'Empresa (A a Z)']];
 const CHAVES_LISTA = ['faixa', 'situacao', 'papel', 'uf', 'cidade', 'bairro', 'atividade', 'tipo_whatsapp', 'solar', 'oportunidade'];
 
@@ -32,7 +46,7 @@ const copiaFiltros = (f) => JSON.parse(JSON.stringify(f));
 const igualPadrao = (f) => JSON.stringify(f) === JSON.stringify(filtrosPadrao());
 
 /* filtros, ordem e busca viajam no hash: #/lista/<id>?faixa=A&ordem=aptidao */
-function filtrosDoHash(qs) {
+function filtrosDoHash(qs, meta) {
   const q = new URLSearchParams(qs || '');
   const f = filtrosPadrao();
   CHAVES_LISTA.forEach((k) => { f[k] = q.getAll(k); });
@@ -41,7 +55,7 @@ function filtrosDoHash(qs) {
   f.so_disparo = q.get('so_disparo') !== '0';
   f.busca = q.get('busca') || '';
   f.pasta = q.get('pasta') || '';
-  const ordem = ORDENS.some(([v]) => v === q.get('ordem')) ? q.get('ordem') : 'relevancia';
+  const ordem = limparOcultosDoPublico(meta, f, ORDENS.some(([v]) => v === q.get('ordem')) ? q.get('ordem') : 'relevancia');
   return { f, ordem };
 }
 function queryDoHash(f, ordem) {
@@ -102,7 +116,7 @@ async function gerarDeNovo(meta) {
   if (!ok) return;
   const p = meta.parametros || {};
   try {
-    const r = await api('/api/listas', { method: 'POST', corpo: { uf: meta.uf, ...(listaPorNome(meta) ? { palavras: meta.palavras } : { cidade: meta.cidade }), cnaes: (meta.atividades || []).map((a) => a.codigo), so_ativas: !!p.so_ativas, incluir_mei: !!p.incluir_mei, so_locais: p.so_locais !== false, validar_whatsapp: !!p.validar_whatsapp } });
+    const r = await api('/api/listas', { method: 'POST', corpo: { uf: meta.uf, ...(meta.publico ? { publico: meta.publico } : {}), ...(listaPorNome(meta) ? { palavras: meta.palavras } : { cidade: meta.cidade }), cnaes: (meta.atividades || []).map((a) => a.codigo), so_ativas: !!p.so_ativas, incluir_mei: !!p.incluir_mei, so_locais: p.so_locais !== false, validar_whatsapp: !!p.validar_whatsapp } });
     location.hash = `#/lista/${encodeURIComponent(r.id)}`;
   } catch (e) { avisar(e.message, 'erro'); }
 }
@@ -111,6 +125,7 @@ function cabecalhoDaLista(meta, acoes) {
   const r = meta.resumo;
   const partes = [nomeAtividades(meta), `gerada ${dataRelativa(meta.criada_em)}`];
   if (r) partes.push(`${num(r.total_de_empresas)} empresas analisadas`);
+  partes.push(`Público: ${rotuloPublico(meta)}`);
   return h('header', { class: 'lista-cab' },
     h('a', { class: 'link-volta', href: '#/listas' }, icone('esquerda', 16), 'Listas'),
     h('div', { class: 'lista-cab-linha' },
@@ -168,7 +183,10 @@ const OCULTOS_PERFIL = new Set(['chance_dono', 'aptidao_solar', 'potencial_casa'
 const OPORT = { 'Casa e empresa': { ic: 'casapredio', tom: 'verde' }, Casa: { ic: 'casa', tom: 'azul' }, Empresa: { ic: 'predio', tom: 'azul' }, 'Ampliação': { ic: 'raio', tom: 'laranja' }, 'Baixo potencial': { ic: null, tom: 'cinza' } };
 
 async function montarLista(raiz, meta, abaInicial, qs) {
-  const inicial = filtrosDoHash(qs);
+  const inicial = filtrosDoHash(qs, meta);
+  const empresa = publicoEmpresa(meta);
+  const ATALHOS = atalhosDaLista(meta);
+  const ordens = ORDENS.filter(([v]) => !(empresa && ORDENS_SO_DONO.includes(v)));
   const L = {
     meta, f: inicial.f, ordem: inicial.ordem, pagina: 1, filtros: null,
     aba: abaInicial, painelVelho: true, pessoal: null, temWhats: false,
@@ -182,6 +200,7 @@ async function montarLista(raiz, meta, abaInicial, qs) {
   const btnExportar = h('a', { class: 'btn btn-prim', 'aria-disabled': 'true' }, icone('baixar', 18), h('span', { class: 'rot-exp', text: 'Exportar contatos' }));
   const menu = criarMenu(icone('pontos', 20), [
     { rotulo: 'Exportar tudo', nota: 'Todos os contatos prontos, sem filtros', icone: 'baixar', href: `/api/listas/${idUrl}/exportar` },
+    { rotulo: 'Mudar público…', nota: 'Escolha para quem é esta lista', icone: 'pessoa', aoClicar: () => dialogoMudarPublico(meta) },
     { rotulo: 'Gerar de novo', nota: 'Cria outra lista com as mesmas escolhas', icone: 'atualizar', aoClicar: () => gerarDeNovo(meta) },
     { rotulo: 'Excluir lista', icone: 'lixeira', perigo: true, aoClicar: () => excluirLista(meta, () => { location.hash = '#/listas'; }) },
   ], { classeBotao: 'btn btn-sec btn-redondo', rotulo: 'Mais ações da lista' });
@@ -225,7 +244,7 @@ async function montarLista(raiz, meta, abaInicial, qs) {
 
   /* --- busca e ordem --- */
   const busca = h('input', { type: 'search', id: 'busca-contatos', placeholder: 'Buscar nome, empresa ou telefone…', autocomplete: 'off', 'aria-label': 'Buscar nos contatos' });
-  const seletorOrdem = h('select', { id: 'ordem', 'aria-label': 'Ordenar por' }, ORDENS.map(([v, r]) => h('option', { value: v, text: r })));
+  const seletorOrdem = h('select', { id: 'ordem', 'aria-label': 'Ordenar por' }, ordens.map(([v, r]) => h('option', { value: v, text: r })));
   busca.addEventListener('input', debounce(() => { L.f.busca = busca.value; mudou(); }, 300));
   busca.value = L.f.busca; seletorOrdem.value = L.ordem;
   seletorOrdem.addEventListener('change', () => { L.ordem = seletorOrdem.value; sincronizarHash(); carregar(true); });
@@ -302,9 +321,9 @@ async function montarLista(raiz, meta, abaInicial, qs) {
     atualizarApt();
     const comWhats = (fo.tipo_whatsapp || []).some((o) => o.valor === 'pessoal' || o.valor === 'business');
     corpoFiltros.replaceChildren(
-      pil('oportunidade'), pil('faixa'), grupoPasta(), pil('solar'), comWhats ? pil('tipo_whatsapp') : null, pil('situacao'), pil('papel'),
+      empresa ? null : pil('oportunidade'), pil('faixa'), grupoPasta(), empresa ? null : pil('solar'), comWhats ? pil('tipo_whatsapp') : null, pil('situacao'), pil('papel'),
       (fo.uf || []).length > 1 ? grupoLista('uf', fo.uf) : null, (fo.cidade || []).length > 1 ? grupoLista('cidade', fo.cidade) : null,
-      h('fieldset', { class: 'grupo' }, h('legend', { text: 'Potencial mínimo' }), h('div', { class: 'slider' }, apt, aptSaida), h('p', { class: 'dica', text: 'Nota de 0 a 10 do potencial para energia solar.' })),
+      empresa ? null : h('fieldset', { class: 'grupo' }, h('legend', { text: 'Potencial mínimo' }), h('div', { class: 'slider' }, apt, aptSaida), h('p', { class: 'dica', text: 'Nota de 0 a 10 do potencial para energia solar.' })),
       (fo.bairro || []).length ? grupoLista('bairro', fo.bairro) : null, (fo.atividade || []).length ? grupoLista('atividade', fo.atividade) : null,
       h('fieldset', { class: 'grupo' }, h('legend', { text: 'Outros' }), h('div', { class: 'grupo-linhas' }, swEmail.el, swDisp.el)));
     sincs.forEach((f) => f());
@@ -335,7 +354,7 @@ async function montarLista(raiz, meta, abaInicial, qs) {
   /* --- mestre-detalhe (componente compartilhado com as pastas) --- */
   const resultado = h('p', { class: 'resultado', 'aria-live': 'polite' });
   const md = criarMestreDetalhe({
-    local: listaPorNome(meta),
+    local: listaPorNome(meta), publico: meta.publico,
     url: (pagina) => `/api/listas/${idUrl}/contatos?${queryDosFiltros(L.f, { ordem: L.ordem, pagina, por_pagina: 50 })}`,
     perfil: { local: listaPorNome(meta), aoAdicionarPasta: (l, ctx) => { if (ctx && ctx.fechar) ctx.fechar(); abrirAdicionar({ telefones: [l.telefone] }); } },
     vazio: () => estadoVazio('Nenhum contato com esses filtros', 'Afrouxe algum filtro para ver mais contatos.', h('button', { class: 'btn btn-sec', type: 'button', onclick: limparTudo }, 'Limpar filtros')),
@@ -398,7 +417,7 @@ async function montarLista(raiz, meta, abaInicial, qs) {
     if (!painelEl.children.length) painelEl.replaceChildren(esqueletoPainel());
     try {
       const p = await buscaPainel(`/api/listas/${idUrl}/painel?${queryDosFiltros(L.f)}`);
-      painelEl.classList.remove('atualizando'); painelEl.replaceChildren(montarPainel(p));
+      painelEl.classList.remove('atualizando'); painelEl.replaceChildren(montarPainel(p, empresa));
     } catch (e) {
       if (ehAborto(e)) return;
       L.painelVelho = true; painelEl.classList.remove('atualizando');
@@ -471,19 +490,19 @@ function elementoValor(tipo, v) {
 }
 const vazio = (v) => v == null || String(v).trim() === '';
 
-function gruposDoDetalhe(linha) {
+function gruposDoDetalhe(linha, empresa) {
   const grupos = new Map(), conhecidas = new Set();
   // Já aparecem no topo do perfil (nome, selo e anéis); repetir embaixo só polui.
   const noTopo = new Set(['primeiro_nome', 'sobrenome', 'faixa', 'chance_dono', 'aptidao_solar']);
   for (const c of app.campos || []) {
     conhecidas.add(c.chave);
-    if (vazio(linha[c.chave]) || noTopo.has(c.chave)) continue;
+    if (vazio(linha[c.chave]) || noTopo.has(c.chave) || (empresa && c.so_dono)) continue;
     const g = c.grupo || 'Outros dados';
     if (!grupos.has(g)) grupos.set(g, []);
     grupos.get(g).push({ chave: c.chave, rotulo: c.rotulo || c.chave, tipo: c.tipo || 'texto', valor: linha[c.chave] });
   }
   for (const k of Object.keys(linha)) {
-    if (conhecidas.has(k) || vazio(linha[k])) continue;
+    if (conhecidas.has(k) || vazio(linha[k]) || (empresa && campoSoDono(k))) continue;
     if (!grupos.has('Outros dados')) grupos.set('Outros dados', []);
     grupos.get('Outros dados').push({ chave: k, rotulo: k, tipo: 'texto', valor: linha[k] });
   }
@@ -512,12 +531,12 @@ function corResultado(valor, rotulo) {
 const rotuloResultado = (v) => RES.mapa[v] || String(v).replace(/_/g, ' ');
 
 /* ---------- mestre-detalhe de contatos (usado na lista e nas pastas) ---------- */
-function sinaisDoContato(l) {
+function sinaisDoContato(l, empresa) {
   const out = [];
   if (l.tipo_whatsapp === 'pessoal') out.push(h('span', { class: 'sinal sinal-whats verde', title: 'WhatsApp confirmado · conta pessoal', role: 'img', 'aria-label': 'WhatsApp confirmado, conta pessoal' }, icone('whatsapp', 15)));
   else if (l.tipo_whatsapp === 'business') out.push(h('span', { class: 'sinal sinal-whats azul', title: 'WhatsApp confirmado · conta comercial', role: 'img', 'aria-label': 'WhatsApp confirmado, conta comercial' }, icone('whatsapp', 15)));
   out.push(seloFaixa(l.faixa));
-  const o = OPORT[l.oportunidade];
+  const o = empresa ? null : OPORT[l.oportunidade];
   if (o && o.ic) out.push(h('span', { class: 'sinal sinal-oport', title: `Oportunidade: ${l.oportunidade}`, role: 'img', 'aria-label': `Oportunidade: ${l.oportunidade}` }, icone(o.ic, 16)));
   if (l.resultado) { const r = rotuloResultado(l.resultado); out.push(h('span', { class: `dot-res dot-${corResultado(l.resultado, r)}`, title: `Resultado: ${r}`, role: 'img', 'aria-label': `Resultado: ${r}` })); }
   const ps = Array.isArray(l.pastas) ? l.pastas : [];
@@ -534,11 +553,13 @@ function criarMestreDetalhe(opc) {
   const perfilEl = h('aside', { class: 'md-perfil', 'aria-label': 'Perfil do contato' });
   const el = h('div', { class: 'md' }, h('div', { class: 'md-col' }, listaEl, rodape), perfilEl);
   let observador = null;
+  /* público do contato: o da lista (opc.publico) ou, nas pastas, o que o contato traz */
+  const ehEmpresa = (l) => (opc.publico ? opc.publico === 'empresa' : publicoEmpresa(l));
   const ctx = () => ({ fechar: () => S.modal && S.modal.fechar(), remover: (l) => remover(l) });
 
   function linha(l, i) {
     return h('button', { class: 'linha-contato' + (i === S.sel ? ' sel' : ''), type: 'button', role: 'listitem', 'aria-current': i === S.sel ? 'true' : null, onclick: () => selecionar(i, true) },
-      avatar(l), h('span', { class: 'lc-tx' }, h('span', { class: 'lc-nome', text: nomeCompleto(l) || 'Contato sem nome' }), h('span', { class: 'lc-emp', text: l.empresa || l.razao_social || '' }), opc.local && localDoContato(l) ? h('span', { class: 'lc-loc', text: localDoContato(l) }) : null), sinaisDoContato(l));
+      avatar(l), h('span', { class: 'lc-tx' }, h('span', { class: 'lc-nome', text: nomeCompleto(l) || 'Contato sem nome' }), h('span', { class: 'lc-emp', text: l.empresa || l.razao_social || '' }), opc.local && localDoContato(l) ? h('span', { class: 'lc-loc', text: localDoContato(l) }) : null), sinaisDoContato(l, ehEmpresa(l)));
   }
   function desenharLista() {
     if (observador) observador.disconnect();
@@ -568,13 +589,13 @@ function criarMestreDetalhe(opc) {
       perfilEl.replaceChildren(S.res ? estadoVazio('Selecione um contato', 'O perfil aparece aqui.', null, 'pessoa') : h('div', { class: 'sk-pilha' }, esqueleto('72px', '72px', 'redondo'), esqueleto('50%', '22px'), esqueleto('80%', '14px'), esqueleto('100%', '120px')));
       return;
     }
-    perfilEl.replaceChildren(perfilContato(l, opc.perfil || {}, ctx()));
+    perfilEl.replaceChildren(perfilContato(l, opc.perfil || {}, ctx(), ehEmpresa(l)));
     perfilEl.scrollTop = 0;
   }
   function abrirFolha(l) {
     if (!l) return;
     const painel = h('div', { class: 'folha folha-perfil', role: 'dialog', 'aria-modal': 'true', 'aria-label': `Perfil de ${nomeCompleto(l) || 'contato'}`, tabindex: '-1' },
-      h('button', { class: 'btn-icone folha-fechar', type: 'button', 'aria-label': 'Fechar perfil', 'data-foco': '', onclick: () => S.modal && S.modal.fechar() }, icone('x', 20)), perfilContato(l, opc.perfil || {}, ctx()));
+      h('button', { class: 'btn-icone folha-fechar', type: 'button', 'aria-label': 'Fechar perfil', 'data-foco': '', onclick: () => S.modal && S.modal.fechar() }, icone('x', 20)), perfilContato(l, opc.perfil || {}, ctx(), ehEmpresa(l)));
     S.modal = abrirModal(painel, { baixo: true, aoFechar: () => { S.modal = null; } });
   }
   estreito.addEventListener('change', desenharPerfil);
@@ -615,21 +636,35 @@ function linhaWhats(l) {
 }
 
 /* perfil do contato: anéis, oportunidade, pastas e grupos de /api/campos */
-function perfilContato(l, opc, ctx) {
+/* até 3 fatos da empresa, só com o que já vem nos dados do contato */
+function fatosDaEmpresa(l) {
+  const fatos = [];
+  const idade = Number(l.idade_empresa);
+  if (!vazio(l.idade_empresa) && Number.isFinite(idade)) fatos.push({ v: num(idade), r: idade === 1 ? 'ano de empresa' : 'anos de empresa' });
+  const socios = Number(l.numero_socios);
+  if (!vazio(l.numero_socios) && Number.isFinite(socios) && socios > 0) fatos.push({ v: num(socios), r: socios === 1 ? 'sócio' : 'sócios' });
+  const ativas = Number(l.empresas_ativas_do_dono);
+  if (!vazio(l.empresas_ativas_do_dono) && Number.isFinite(ativas) && ativas > 1) fatos.push({ v: num(ativas), r: 'empresas ativas do dono' });
+  /* dois números ao lado do anel: cabem numa linha só; o porte continua na seção Empresa */
+  return fatos.slice(0, 2);
+}
+
+function perfilContato(l, opc, ctx, empresa) {
   const nome = nomeCompleto(l), dig = soDigitos(l.telefone);
   const chance = Number(l.chance_dono) || 0;
   const casa = Number(l.potencial_casa), emp = Number(l.potencial_empresa), apt = Number(l.aptidao_solar);
-  const o = OPORT[l.oportunidade];
+  const o = empresa ? null : OPORT[l.oportunidade];
   const grupos = [];
-  gruposDoDetalhe(l).forEach((itens, g) => {
+  gruposDoDetalhe(l, empresa).forEach((itens, g) => {
     const linhas = itens.filter((it) => !OCULTOS_PERFIL.has(it.chave)).map((it) => h('div', { class: 'ir' },
       h('dt', { text: it.rotulo }), h('dd', {}, it.chave === 'faixa' ? (FAIXA_ROTULO[it.valor] || it.valor) : elementoValor(it.tipo, it.valor))));
     if (linhas.length) grupos.push(h('section', { class: 'pf-grupo' }, h('h3', {}, icone(ICONE_GRUPO[g] || 'info', 18), g), h('dl', { class: 'ir-grupo' }, linhas)));
   });
   const aneis = [h('div', { class: 'pf-anel' }, anel({ valor: chance, texto: `${chance}%`, cor: '--verde', tam: 76, espessura: 7, rotulo: `Chance de ser o dono: ${chance}%` }), h('span', { text: 'Chance de ser o dono' }))];
-  if (Number.isFinite(casa)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: casa * 10, texto: String(casa), cor: '--acento', tam: 76, espessura: 7, rotulo: `Potencial da casa: ${casa} de 10` }), h('span', { text: 'Potencial da casa' })));
-  if (Number.isFinite(emp)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: emp * 10, texto: String(emp), cor: '--laranja', tam: 76, espessura: 7, rotulo: `Potencial da empresa: ${emp} de 10` }), h('span', { text: 'Potencial da empresa' })));
-  if (!Number.isFinite(casa) && !Number.isFinite(emp) && Number.isFinite(apt)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: apt * 10, texto: String(apt), cor: '--acento', tam: 76, espessura: 7, rotulo: `Potencial: ${apt} de 10` }), h('span', { text: 'Potencial' })));
+  if (empresa) fatosDaEmpresa(l).forEach((f) => aneis.push(h('div', { class: 'pf-anel' }, h('span', { class: 'pf-fato-v' + (f.txt ? ' txt' : ''), text: f.v }), h('span', { text: f.r }))));
+  if (!empresa && Number.isFinite(casa)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: casa * 10, texto: String(casa), cor: '--acento', tam: 76, espessura: 7, rotulo: `Potencial da casa: ${casa} de 10` }), h('span', { text: 'Potencial da casa' })));
+  if (!empresa && Number.isFinite(emp)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: emp * 10, texto: String(emp), cor: '--laranja', tam: 76, espessura: 7, rotulo: `Potencial da empresa: ${emp} de 10` }), h('span', { text: 'Potencial da empresa' })));
+  if (!empresa && !Number.isFinite(casa) && !Number.isFinite(emp) && Number.isFinite(apt)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: apt * 10, texto: String(apt), cor: '--acento', tam: 76, espessura: 7, rotulo: `Potencial: ${apt} de 10` }), h('span', { text: 'Potencial' })));
   const ps = Array.isArray(l.pastas) ? l.pastas : [];
   const linhaPastas = (ps.length || opc.aoAdicionarPasta) ? h('div', { class: 'pf-pastas' },
     h('span', { class: 'pf-pastas-t' }, icone('pasta', 16), 'Pastas'),
@@ -666,5 +701,35 @@ function dialogoExportar({ total, conf, todos, soConfirmados }) {
     h('h2', { id: idT, text: nenhum ? `Nenhum dos ${num(total)} contatos tem WhatsApp confirmado.` : `${num(fora)} dos ${num(total)} contatos ainda não têm WhatsApp confirmado.` }),
     h('p', { id: idT + '-d', text: nenhum ? 'Verifique os números antes de exportar para disparar só para quem tem WhatsApp.' : 'Para o disparo, o melhor é exportar só quem já tem WhatsApp confirmado.' }),
     h('div', { class: 'dialogo-acoes dialogo-acoes-col' }, acoes, h('button', { class: 'btn btn-texto', type: 'button', onclick: () => m.fechar() }, 'Cancelar')));
+  const m = abrirModal(painel);
+}
+
+/* ---------- mudar o público de uma lista pronta ---------- */
+function dialogoMudarPublico(meta) {
+  const idT = uid('dlg');
+  const atual = publicoEmpresa(meta) ? 'empresa' : 'dono';
+  const escolha = opcoesPublico({ valor: atual });
+  const erro = h('p', { class: 'erro-inline', role: 'alert' });
+  const aplicar = h('button', { class: 'btn btn-prim', type: 'button' }, 'Aplicar');
+  const cancelar = h('button', { class: 'btn btn-sec', type: 'button', 'data-foco': '', onclick: () => m.fechar() }, 'Cancelar');
+  aplicar.addEventListener('click', async () => {
+    const novo = escolha.valor();
+    if (novo === atual) { m.fechar(); return; }
+    aplicar.disabled = true; cancelar.disabled = true; erro.textContent = '';
+    aplicar.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Aplicando…');
+    try {
+      await api(`/api/listas/${encodeURIComponent(meta.id)}`, { method: 'PATCH', corpo: { publico: novo } });
+      avisar('Público da lista alterado.');
+      rotear();
+    } catch (e) {
+      erro.textContent = e.status === 409 ? 'Esta lista ainda não está pronta. Espere terminar de gerar.' : e.message;
+      aplicar.disabled = false; cancelar.disabled = false; aplicar.replaceChildren('Aplicar');
+    }
+  });
+  const painel = h('div', { class: 'dialogo', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': idT, tabindex: '-1' },
+    h('h2', { id: idT, text: 'Mudar público' }),
+    h('p', { text: 'Os contatos são reordenados para o novo público. Filtros que deixarem de valer são desligados.' }),
+    escolha.el, erro,
+    h('div', { class: 'dialogo-acoes' }, cancelar, aplicar));
   const m = abrirModal(painel);
 }

@@ -202,3 +202,92 @@ def test_mais_de_dez_palavras_da_400():
 )
 def test_rotulo_da_lista(meta, esperado):
     assert servidor._rotulo(meta) == esperado
+
+
+# ---------- público da lista ----------
+
+from solar_leads import pipeline  # noqa: E402
+
+
+def linha(cnpj, *, faixa="A", whatsapp="não verificado", aptidao=5, chance=70, solar="sem registro", situacao="ativa"):
+    return {
+        "cnpj": cnpj, "faixa": faixa, "whatsapp": whatsapp, "aptidao_solar": aptidao, "chance_dono": chance,
+        "solar": solar, "situacao": situacao, "fonte": "Receita", "cidade": "Montes Claros", "telefone": "+55389" + cnpj,
+        "dono_chave": "",
+    }
+
+
+def test_no_publico_dono_o_potencial_solar_desempata_antes_da_chance():
+    linhas = [linha("1", aptidao=3, chance=95), linha("2", aptidao=9, chance=70)]
+    pipeline.ordenar(linhas, "Montes Claros", "dono")
+    assert [l["cnpj"] for l in linhas] == ["2", "1"]
+
+
+def test_no_publico_empresa_vale_a_chance_e_o_potencial_solar_nao_conta():
+    linhas = [linha("1", aptidao=3, chance=95), linha("2", aptidao=9, chance=70)]
+    pipeline.ordenar(linhas, "Montes Claros", "empresa")
+    assert [l["cnpj"] for l in linhas] == ["1", "2"]
+    assert [l["ordem"] for l in linhas] == [0, 1]
+
+
+@pytest.mark.parametrize("publico", pipeline.PUBLICOS)
+def test_whatsapp_confirmado_vem_primeiro_nos_dois_publicos(publico):
+    linhas = [linha("1", chance=100, aptidao=10), linha("2", whatsapp="sim", chance=40, aptidao=0, faixa="B")]
+    pipeline.ordenar(linhas, "Montes Claros", publico)
+    assert linhas[0]["cnpj"] == "2"
+
+
+def test_etiquetas_do_publico_empresa_nao_falam_de_solar():
+    linhas = [linha("1", solar="empresa já tem")]
+    pipeline.ordenar(linhas, "Montes Claros", "empresa")
+    assert linhas[0]["tags"] == "empresas,faixa-a,montes-claros,fonte-receita,cnpj-ativa"
+    pipeline.ordenar(linhas, "Montes Claros", "dono")
+    assert linhas[0]["tags"] == "solar,faixa-a,montes-claros,fonte-receita,cnpj-ativa,ja-tem-solar"
+
+
+def test_publico_desconhecido_recusa():
+    with pytest.raises(ValueError):
+        pipeline.ordenar([linha("1")], "X", "outro")
+
+
+def test_csv_do_publico_empresa_sai_sem_as_colunas_de_solar():
+    chaves, cabecalhos = pipeline.chaves_do_publico("empresa"), pipeline.cabecalhos_do_publico("empresa")
+    assert len(chaves) == len(cabecalhos) == len(pipeline.CHAVES) - len(pipeline.SO_DO_DONO)
+    assert not {"solar", "solar_kw", "aptidao_solar", "potencial_casa", "oportunidade"} & set(chaves)
+    assert {"telefone", "chance_dono", "whatsapp", "cidade", "uf", "tags"} <= set(chaves)
+    assert pipeline.chaves_do_publico("dono") == pipeline.CHAVES
+    assert pipeline.cabecalhos_do_publico("dono") == pipeline.CABECALHOS
+
+
+def test_trocar_publico_reordena_a_lista_gravada_sem_perder_linhas(tmp_path):
+    base = {c: "" for c in pipeline.CHAVES + pipeline.INTERNAS}
+    linhas = [
+        {**base, **linha("1", aptidao=3, chance=95), "primeiro_nome": "Ana"},
+        {**base, **linha("2", aptidao=9, chance=70), "primeiro_nome": "Bia"},
+    ]
+    pipeline.ordenar(linhas, "Montes Claros", "dono")
+    arquivo = tmp_path / "lista.parquet"
+    pipeline.salvar_parquet(linhas, arquivo)
+    ler = lambda: duckdb.execute(f"SELECT cnpj, ordem, tags, primeiro_nome, chance_dono FROM read_parquet('{arquivo}') ORDER BY ordem").fetchall()
+    assert [l[0] for l in ler()] == ["2", "1"]
+    pipeline.trocar_publico(arquivo, "Montes Claros", "empresa")
+    depois = ler()
+    assert [l[0] for l in depois] == ["1", "2"]
+    assert depois[0][1:] == (0, "empresas,faixa-a,montes-claros,fonte-receita,cnpj-ativa", "Ana", 95)
+    pipeline.trocar_publico(arquivo, "Montes Claros", "dono")
+    assert [l[0] for l in ler()] == ["2", "1"]
+
+
+def test_campos_marcam_o_que_e_so_do_publico_dono(logado):
+    campos = {c["chave"]: c["so_dono"] for c in logado.get("/api/campos").json()}
+    assert campos["solar"] and campos["potencial_casa"] and campos["aptidao_solar"]
+    assert not campos["telefone"] and not campos["chance_dono"] and not campos["cidade"]
+
+
+def test_mudar_publico_de_lista_inexistente_da_404(logado):
+    assert logado.patch("/api/listas/nao-existe", json={"publico": "empresa"}).status_code in (404, 503)
+
+
+def test_criar_lista_com_publico_desconhecido_da_400(logado):
+    r = logado.post("/api/listas", json={"palavras": ["solar"], "publico": "qualquer"})
+    assert r.status_code == 400

@@ -279,3 +279,19 @@ function ajuste({ icone: ic, tom, titulo, descricao, valor, acao }) {
     h('div', { class: 'ajuste-tx' }, h('div', { class: 'ajuste-t', text: titulo }), descricao ? h('div', { class: 'ajuste-d', text: descricao }) : null),
     valor != null ? h('div', { class: 'ajuste-v' }, valor) : null, acao || null);
 }
+
+/* ---------- escolha do público da lista (dois cartões de opção) ---------- */
+function opcoesPublico({ valor, aoMudar }) {
+  const nome = uid('publico');
+  let atual = valor;
+  const el = h('div', { class: 'opcoes-publico', role: 'radiogroup', 'aria-label': 'Para que é esta lista?' });
+  PUBLICOS.forEach((o) => {
+    const idc = uid('pub');
+    const input = h('input', { type: 'radio', name: nome, id: idc, value: o.valor });
+    input.checked = o.valor === valor;
+    input.addEventListener('change', () => { if (!input.checked) return; atual = o.valor; if (aoMudar) aoMudar(o.valor); });
+    el.append(h('label', { class: 'opcao-publico', for: idc }, input,
+      h('span', { class: 'op-tx' }, h('span', { class: 'op-t', text: o.titulo }), h('span', { class: 'op-d', text: o.apoio }))));
+  });
+  return { el, valor: () => atual };
+}

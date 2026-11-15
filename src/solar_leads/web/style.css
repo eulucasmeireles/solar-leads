@@ -652,3 +652,21 @@ input:focus-visible, select:focus-visible { outline: 0; border-color: var(--acen
 .opcoes-prev { max-height: 300px; margin-top: 4px; }
 .prev-soma { font-size: 14px; color: var(--txt2); }
 .folha-sec .chips[hidden] { display: none; }
+
+/* escolha do público da lista */
+.opcoes-publico { display: flex; flex-direction: column; gap: 10px; text-align: left; }
+.opcao-publico { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border: 1px solid var(--linha); border-radius: 18px; background: var(--card); cursor: pointer; transition: border-color .2s, background .2s; }
+.opcao-publico:hover { background: var(--apoio); }
+.opcao-publico:has(input:checked) { border-color: var(--acento); background: var(--apoio); }
+.opcao-publico:has(input:focus-visible) { outline: 2px solid var(--acento); outline-offset: 2px; }
+.opcao-publico input { flex: none; width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--acento); }
+.op-tx { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.op-t { font-size: 15px; font-weight: 500; color: var(--txt); }
+.op-d { font-size: 13px; line-height: 1.4; color: var(--txt2); }
+.dialogo .opcoes-publico { margin-top: 6px; }
+.dialogo .erro-inline { text-align: left; }
+
+/* fatos da empresa no perfil (no lugar dos anéis de potencial) */
+.pf-fato-v { display: flex; align-items: center; justify-content: center; min-width: 76px; max-width: 120px; min-height: 76px; padding: 6px 12px; border-radius: 24px; background: var(--apoio); font-size: 24px; font-weight: 300; letter-spacing: -.02em; text-align: center; }
+.pf-fato-v.txt { font-size: 14px; font-weight: 500; letter-spacing: 0; line-height: 1.25; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .pf-fato-v { min-width: 0; width: 100%; max-width: none; } }

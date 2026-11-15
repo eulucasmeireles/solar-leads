@@ -72,7 +72,7 @@ const COR_FAIXA = { A: '--verde', B: '--laranja', C: '--cinza-graf' };
 const COR_WHATS = { pessoal: '--verde', business: '--acento', 'não verificado': '--cinza-graf', '': '--cinza-graf' };
 const COR_SOLAR = ['--cinza-graf', '--acento', '--azul-2', '--azul-3', '--laranja'];
 
-function montarPainel(p) {
+function montarPainel(p, empresa) {
   const total = p.total || 0;
   const ct = `${num(total)} contatos`;
   const aptidao = Array.from({ length: 11 }, (_, i) => {
@@ -84,17 +84,18 @@ function montarPainel(p) {
   const solarOrdem = ['sem registro', 'dono: indício fraco', 'empresa já tem', 'outra unidade da empresa tem', 'outra empresa do dono tem'];
   const solar = (p.solar || []).slice().sort((a, b) => solarOrdem.indexOf(a.valor) - solarOrdem.indexOf(b.valor));
   const COR_OPORT = { 'Casa e empresa': '--verde', Casa: '--acento', Empresa: '--azul-2', 'Ampliação': '--laranja', 'Baixo potencial': '--cinza-graf' };
+  const so = (card) => (empresa ? null : card);
   const raiz = h('div', { class: 'graficos' },
-    cartaoGrafico('Onde está a oportunidade', null, donut({ dados: p.oportunidade, rotulo: (d) => d.valor || 'Não informada', cor: (d) => COR_OPORT[d.valor] || '--cinza-graf' })),
+    so(cartaoGrafico('Onde está a oportunidade', null, donut({ dados: p.oportunidade, rotulo: (d) => d.valor || 'Não informada', cor: (d) => COR_OPORT[d.valor] || '--cinza-graf' }))),
     cartaoGrafico('Força dos contatos', null, donut({ dados: p.faixa, rotulo: (d) => FAIXA_ROTULO[d.valor] || 'Sem faixa', cor: (d) => COR_FAIXA[d.valor] || '--cinza-graf' })),
-    cartaoGrafico('Energia solar', null, donut({ dados: solar, rotulo: (d) => ROTULO_SOLAR[d.valor] || titleCase(d.valor), cor: (d, i) => (d.valor === 'sem registro' ? '--cinza-graf' : COR_SOLAR[(i % 4) + 1]) })),
+    so(cartaoGrafico('Energia solar', null, donut({ dados: solar, rotulo: (d) => ROTULO_SOLAR[d.valor] || titleCase(d.valor), cor: (d, i) => (d.valor === 'sem registro' ? '--cinza-graf' : COR_SOLAR[(i % 4) + 1]) }))),
     cartaoGrafico('Tipo de WhatsApp', null, donut({ dados: p.whatsapp, rotulo: (d) => ROTULOS_WHATS[d.valor] || d.valor, cor: (d) => COR_WHATS[d.valor] || '--cinza-graf' })),
     cartaoGrafico('Situação do CNPJ', null, donut({ dados: p.situacao, rotulo: (d) => titleCase(d.valor || 'não informada'), cor: (d, i) => (['--verde', '--cinza-graf', '--laranja', '--acento', '--vermelho'])[i % 5] })),
     cartaoGrafico('Atividades mais comuns', 'as 10 principais', barras({ dados: p.atividades, rotulo: (d) => d.valor || 'Não informada' })),
     cartaoGrafico('Bairros com mais contatos', 'os 10 principais', barras({ dados: p.bairros, rotulo: (d) => d.valor || 'Não informado' })),
     cartaoGrafico('Idade do dono', null, colunas({ dados: (p.idade || []).map((d) => ({ ...d, valor: String(d.valor) })), rotulo: (d) => d.valor || '—', cor: '--acento', legenda: 'Contatos por faixa de idade do dono' })),
-    cartaoGrafico('Nota de potencial', 'de 0 a 10', colunas({ dados: aptidao, rotulo: (d) => String(d.valor), cor: '--acento', legenda: 'Contatos por nota de potencial' })),
-    cartaoGrafico('Empresas que instalaram solar', totalAnos ? `${num(totalAnos)} empresas` : null, colunas({ dados: comAnos, rotulo: (d) => String(d.valor), cor: '--laranja', legenda: 'Empresas que instalaram energia solar por ano' })));
+    so(cartaoGrafico('Nota de potencial', 'de 0 a 10', colunas({ dados: aptidao, rotulo: (d) => String(d.valor), cor: '--acento', legenda: 'Contatos por nota de potencial' }))),
+    so(cartaoGrafico('Empresas que instalaram solar', totalAnos ? `${num(totalAnos)} empresas` : null, colunas({ dados: comAnos, rotulo: (d) => String(d.valor), cor: '--laranja', legenda: 'Empresas que instalaram energia solar por ano' }))));
   /* preenche com animação ao aparecer */
   requestAnimationFrame(() => requestAnimationFrame(() => raiz.classList.add('pronto')));
   return raiz;

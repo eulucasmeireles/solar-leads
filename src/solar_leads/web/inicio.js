@@ -84,7 +84,7 @@ function esqueletoCartoes(n) {
 let whatsDisp = { disponivel: false, motivo: '' };
 
 function folhaNovaLista(cidade) {
-  const estado = { cnaes: [], modo: 'todas', so_locais: true, so_ativas: false, incluir_mei: false, validar_whatsapp: false };
+  const estado = { publico: 'dono', cnaes: [], modo: 'todas', so_locais: true, so_ativas: false, incluir_mei: false, validar_whatsapp: false };
   const idT = uid('folha');
   const zonaEscolher = h('div', { class: 'folha-escolher', hidden: true });
   const chips = h('div', { class: 'chips' });
@@ -106,6 +106,7 @@ function folhaNovaLista(cidade) {
     aoMudar: (v) => { estado.modo = v; zonaEscolher.hidden = v !== 'escolher'; if (v === 'escolher') ativ.input.focus(); },
   });
   const sw = (rotulo, desc, chave, extra = {}) => interruptor({ rotulo, descricao: desc, checked: estado[chave], disabled: extra.disabled, aoMudar: (v) => { estado[chave] = v; } }).el;
+  const publico = opcoesPublico({ valor: estado.publico, aoMudar: (v) => { estado.publico = v; } });
   const erro = h('p', { class: 'erro-inline', role: 'alert' });
   const botao = h('button', { class: 'btn btn-prim btn-grande', type: 'button' }, 'Gerar lista');
   botao.addEventListener('click', async () => {
@@ -113,7 +114,7 @@ function folhaNovaLista(cidade) {
     botao.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Enviando…');
     try {
       const r = await api('/api/listas', { method: 'POST', corpo: {
-        uf: cidade.uf, cidade: cidade.nome, cnaes: estado.modo === 'escolher' ? estado.cnaes.map((a) => a.codigo) : [],
+        uf: cidade.uf, cidade: cidade.nome, publico: estado.publico, cnaes: estado.modo === 'escolher' ? estado.cnaes.map((a) => a.codigo) : [],
         so_ativas: estado.so_ativas, incluir_mei: estado.incluir_mei, so_locais: estado.so_locais, validar_whatsapp: estado.validar_whatsapp && whatsDisp.disponivel,
       } });
       m.fechar();
@@ -126,6 +127,7 @@ function folhaNovaLista(cidade) {
       h('button', { class: 'btn-icone', type: 'button', 'aria-label': 'Fechar', onclick: () => m.fechar() }, icone('x', 20))),
     h('div', { class: 'folha-corpo' },
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Atividades' }), modo.el, zonaEscolher),
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Para que é esta lista?' }), publico.el),
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Opções' }),
         h('div', { class: 'grupo-linhas' },
           sw('Só empresas da cidade', 'Sede na cidade e telefone da região. Tira filiais e números de fora.', 'so_locais'),
@@ -140,7 +142,7 @@ function folhaNovaLista(cidade) {
 let ufsCache = null;
 
 function folhaPorNome() {
-  const E = { palavras: [], uf: '', previa: null, marcadas: new Set(), so_ativas: true, incluir_mei: false, busca: 0 };
+  const E = { publico: 'empresa', palavras: [], uf: '', previa: null, marcadas: new Set(), so_ativas: true, incluir_mei: false, busca: 0 };
   const idT = uid('folha');
   const chips = h('div', { class: 'chips', hidden: true });
   const campo = h('input', { type: 'text', id: uid('palavras'), placeholder: 'Ex.: solar, fotovolt', autocomplete: 'off', spellcheck: 'false', maxlength: '40', 'aria-label': 'Palavras do nome da empresa', 'data-foco': '' });
@@ -173,6 +175,8 @@ function folhaPorNome() {
   seletorUF.addEventListener('change', () => { E.uf = seletorUF.value; invalidar(); });
   desenharChips();
 
+  /* o público não muda a prévia: não invalida */
+  const publico = opcoesPublico({ valor: E.publico, aoMudar: (v) => { E.publico = v; } });
   const soma = h('p', { class: 'prev-soma' });
   function desenharSoma() {
     const itens = E.previa.atividades;
@@ -240,7 +244,7 @@ function folhaPorNome() {
     btnGerar.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Enviando…');
     try {
       const r = await api('/api/listas', { method: 'POST', corpo: {
-        palavras: E.palavras.slice(), uf: E.uf, cnaes: [...E.marcadas], so_ativas: E.so_ativas, incluir_mei: E.incluir_mei, so_locais: true, validar_whatsapp: false,
+        palavras: E.palavras.slice(), uf: E.uf, publico: E.publico, cnaes: [...E.marcadas], so_ativas: E.so_ativas, incluir_mei: E.incluir_mei, so_locais: true, validar_whatsapp: false,
       } });
       m.fechar();
       location.hash = `#/lista/${encodeURIComponent(r.id)}`;
@@ -255,6 +259,7 @@ function folhaPorNome() {
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Palavras do nome' }), campo, chips,
         h('p', { class: 'dica', text: 'Entram as empresas que têm qualquer uma dessas palavras no nome ou na razão social.' })),
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Região' }), seletorUF),
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Para que é esta lista?' }), publico.el),
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Opções' }),
         h('div', { class: 'grupo-linhas' },
           sw('Só empresas ativas', 'Deixa de fora CNPJs baixados, suspensos ou inaptos.', 'so_ativas'),

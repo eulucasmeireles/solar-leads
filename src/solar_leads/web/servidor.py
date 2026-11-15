@@ -387,7 +387,11 @@ def atividades(q: str = "") -> list[dict]:
 
 @app.get("/api/campos")
 def campos() -> list[dict]:
-    return [{"chave": c, "rotulo": r, "grupo": g, "tipo": t} for c, _, r, g, t in pipeline.CAMPOS]
+    # so_dono: campo de energia solar, que a tela esconde quando o público da lista é "empresa".
+    return [
+        {"chave": c, "rotulo": r, "grupo": g, "tipo": t, "so_dono": c in pipeline.SO_DO_DONO}
+        for c, _, r, g, t in pipeline.CAMPOS
+    ]
 
 
 def _estado_whatsapp() -> dict:
@@ -480,11 +484,28 @@ class NovaLista(BaseModel):
     uf: str = ""
     cidade: str = ""
     palavras: list[str] = []
+    publico: str = ""  # "dono" ou "empresa"; vazio: dono na lista de cidade, empresa na lista por nome
     cnaes: list[str] = []
     so_ativas: bool = False
     incluir_mei: bool = False
     so_locais: bool = True
     validar_whatsapp: bool = False
+
+
+def _publico(meta: dict) -> str:
+    """Listas antigas não têm o campo: valem como público "dono"."""
+    return meta.get("publico") or "dono"
+
+
+def _contar_para_o_cartao(meta: dict) -> None:
+    """Os números do cartão saem da mesma consulta que a tela usa, para os dois baterem."""
+    cte, params = _consulta(LISTAS / f"{meta['id']}.parquet", {}, None, 0, 1, "")
+    n = duckdb.connect().execute(
+        f"""{cte} SELECT count(*), count(*) FILTER (WHERE faixa = 'A'), count(*) FILTER (WHERE faixa = 'B'),
+            count(*) FILTER (WHERE primeiro_nome <> ''), count(*) FILTER (WHERE email <> '') FROM r""",
+        params,
+    ).fetchone()
+    meta["resumo"].update(contatos_para_disparo=n[0], faixa_A=n[1], faixa_B=n[2], com_nome=n[3], com_email=n[4])
 
 
 def _gerar(meta: dict, codigo: str) -> None:
@@ -516,17 +537,10 @@ def _gerar(meta: dict, codigo: str) -> None:
         finally:
             con.close()
         etapa("Montando a lista")
-        linhas, disparo = pipeline.montar(leads, "" if amplo else meta["cidade"], tem_whatsapp)
+        linhas, disparo = pipeline.montar(leads, "" if amplo else meta["cidade"], tem_whatsapp, publico=_publico(meta))
         pipeline.salvar_parquet(linhas, LISTAS / f"{meta['id']}.parquet")
         meta["resumo"] = pipeline.resumir(linhas, disparo, whatsapp_verificado=bool(tem_whatsapp))
-        # Os números do cartão saem da mesma consulta que a tela usa, para os dois baterem.
-        cte, params = _consulta(LISTAS / f"{meta['id']}.parquet", {}, None, 0, 1, "")
-        n = duckdb.connect().execute(
-            f"""{cte} SELECT count(*), count(*) FILTER (WHERE faixa = 'A'), count(*) FILTER (WHERE faixa = 'B'),
-                count(*) FILTER (WHERE primeiro_nome <> ''), count(*) FILTER (WHERE email <> '') FROM r""",
-            params,
-        ).fetchone()
-        meta["resumo"].update(contatos_para_disparo=n[0], faixa_A=n[1], faixa_B=n[2], com_nome=n[3], com_email=n[4])
+        _contar_para_o_cartao(meta)
         meta.update(status="pronta", etapa=None)
     except Exception as e:  # noqa: BLE001 - o erro vai para a tela em vez de sumir na thread
         meta.update(status="erro", etapa=None, erro=f"{type(e).__name__}: {e}")
@@ -627,6 +641,9 @@ def criar_lista(pedido: NovaLista) -> dict:
     con = duckdb.connect()
     cnaes = sorted({"".join(c for c in x if c.isdigit()) for x in pedido.cnaes} - {""})
     palavras = _palavras(pedido.palavras)
+    publico = pedido.publico.strip() or ("empresa" if palavras else "dono")
+    if publico not in pipeline.PUBLICOS:
+        raise HTTPException(400, "Público desconhecido.")
     if palavras:
         uf = _uf_valida(pedido.uf)
         # achado: (código do município, nome da lista, nº de empresas) — aqui não há município.
@@ -663,6 +680,7 @@ def criar_lista(pedido: NovaLista) -> dict:
         "cidade": achado[1],
         "uf": uf,
         "palavras": palavras,
+        "publico": publico,
         "atividades": [{"codigo": c, "descricao": descricoes.get(c, c)} for c in cnaes],
         "parametros": {
             "so_ativas": pedido.so_ativas, "incluir_mei": pedido.incluir_mei, "so_locais": pedido.so_locais,
@@ -682,12 +700,36 @@ def criar_lista(pedido: NovaLista) -> dict:
 @app.get("/api/listas")
 def listar() -> list[dict]:
     metas = [json.loads(a.read_text()) for a in LISTAS.glob("*.json")]
-    return sorted(metas, key=lambda m: m["criada_em"], reverse=True)
+    return sorted(({**m, "publico": _publico(m)} for m in metas), key=lambda m: m["criada_em"], reverse=True)
 
 
 @app.get("/api/listas/{id_}")
 def uma_lista(id_: str) -> dict:
-    return _ler_meta(id_)
+    meta = _ler_meta(id_)
+    return {**meta, "publico": _publico(meta)}
+
+
+class Publico(BaseModel):
+    publico: str
+
+
+@app.patch("/api/listas/{id_}")
+def mudar_publico(id_: str, pedido: Publico) -> dict:
+    """Troca o público de uma lista pronta: muda a ordem, as etiquetas e o que a tela e o CSV mostram.
+
+    Os contatos e os telefones continuam os mesmos; não é preciso gerar de novo.
+    """
+    meta = _ler_meta(id_)
+    if pedido.publico not in pipeline.PUBLICOS:
+        raise HTTPException(400, "Público desconhecido.")
+    if meta["status"] != "pronta":
+        raise HTTPException(409, "Espere a lista ficar pronta para mudar o público.")
+    if pedido.publico != _publico(meta):
+        pipeline.trocar_publico(_parquet(id_), "" if meta.get("palavras") else meta["cidade"], pedido.publico)
+        meta["publico"] = pedido.publico
+        _contar_para_o_cartao(meta)
+        _gravar_meta(meta)
+    return meta
 
 
 @app.delete("/api/listas/{id_}")
@@ -882,10 +924,10 @@ def painel(id_: str, f: Annotated[Filtros, Depends()]) -> dict:
     }
 
 
-def _csv(linhas: list[list], nome: str) -> StreamingResponse:
+def _csv(linhas: list[list], nome: str, publico: str = "dono") -> StreamingResponse:
     saida = io.StringIO()
     w = csv.writer(saida)
-    w.writerow(pipeline.CABECALHOS)
+    w.writerow(pipeline.cabecalhos_do_publico(publico))
     w.writerows([[pipeline.celula_segura(v) for v in linha] for linha in linhas])
     return StreamingResponse(
         iter(["﻿" + saida.getvalue()]),
@@ -897,11 +939,15 @@ def _csv(linhas: list[list], nome: str) -> StreamingResponse:
 @app.get("/api/listas/{id_}/exportar")
 def exportar(id_: str, f: Annotated[Filtros, Depends()], request: Request) -> StreamingResponse:
     cte, params = f.consulta(_parquet(id_))
-    sel = ", ".join(pipeline.CHAVES)
-    linhas = duckdb.connect().execute(f"{cte} SELECT {sel} FROM r ORDER BY {f.ordem}", params).fetchall()
     meta = _ler_meta(id_)
+    sel = ", ".join(pipeline.chaves_do_publico(_publico(meta)))
+    linhas = duckdb.connect().execute(f"{cte} SELECT {sel} FROM r ORDER BY {f.ordem}", params).fetchall()
     pastas.registrar_exportacao("lista", id_, f"Lista de {_rotulo(meta)}", len(linhas), _ip(request))
-    return _csv(linhas, f"solar-leads-{pipeline.slug(meta['cidade'])[:40]}-{meta['uf'].lower() or 'br'}-{datetime.now():%Y%m%d-%H%M}.csv")
+    return _csv(
+        linhas,
+        f"solar-leads-{pipeline.slug(meta['cidade'])[:40]}-{meta['uf'].lower() or 'br'}-{datetime.now():%Y%m%d-%H%M}.csv",
+        _publico(meta),
+    )
 
 
 # ---------- pastas ----------
@@ -974,6 +1020,8 @@ def adicionar_a_pasta(
         cte, params = f.consulta(arquivo, "fora" if pular_em_pastas and not f.pasta else None)
         limite = f"LIMIT {int(quantidade)}" if quantidade > 0 else ""
         linhas = _linhas(con.execute(f"{cte} SELECT * EXCLUDE (dono_chave, ordem) FROM r ORDER BY {f.ordem} {limite}", params))
+    for l in linhas:
+        l["publico"] = _publico(meta)  # a pasta guarda de que tipo de lista o contato veio
     novos, ja = pastas.adicionar(pasta_id, linhas, lista_id, _rotulo(meta))
     return {"adicionados": novos, "ja_estavam": ja, "total_na_pasta": _pasta(pasta_id)["contatos"]}
 
@@ -1001,6 +1049,8 @@ def dividir_em_pastas(
             f"{cte} SELECT * EXCLUDE (dono_chave, ordem) FROM r ORDER BY {f.ordem} LIMIT {tamanho * pastas_n}", params
         )
     )
+    for l in linhas:
+        l["publico"] = _publico(meta)  # a pasta guarda de que tipo de lista o contato veio
     criadas, total = [], 0
     for i, nome in enumerate(nomes):
         parte = linhas[i * tamanho : (i + 1) * tamanho]
@@ -1109,10 +1159,13 @@ def exportar_pasta(pasta_id: int, request: Request) -> StreamingResponse:
     pastas.registrar_exportacao("pasta", str(pasta_id), f"Pasta {pasta['nome']}", len(linhas), _ip(request))
     marca = f"pasta-{pipeline.slug(pasta['nome'])}"
     saida = []
+    # Pasta só com contatos de listas de público "empresa" sai sem as colunas de energia solar.
+    publico = "empresa" if linhas and all(l.get("publico") == "empresa" for l in linhas) else "dono"
+    chaves = pipeline.chaves_do_publico(publico)
     for l in linhas:
         l["tags"] = ",".join(t for t in (l.get("tags") or "", marca) if t)
-        saida.append([l.get(c, "") for c in pipeline.CHAVES])
-    return _csv(saida, f"solar-leads-pasta-{pipeline.slug(pasta['nome'])}-{datetime.now():%Y%m%d-%H%M}.csv")
+        saida.append([l.get(c, "") for c in chaves])
+    return _csv(saida, f"solar-leads-pasta-{pipeline.slug(pasta['nome'])}-{datetime.now():%Y%m%d-%H%M}.csv", publico)
 
 
 # ---------- não contatar ----------

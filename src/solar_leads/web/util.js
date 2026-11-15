@@ -202,6 +202,28 @@ function rotuloLista(m, cap) {
   const t = listaPorNome(m) ? `lista “${nomeDaLista(m)}”` : `lista de ${nomeDaLista(m)}`;
   return cap ? t.charAt(0).toUpperCase() + t.slice(1) : t;
 }
+/* público da lista: "dono" (oferecer energia solar ao dono) ou "empresa" (outra oferta para a empresa).
+   Ausente = "dono". Serve para metas de lista e para contatos de pastas (que trazem o público de origem). */
+const publicoEmpresa = (m) => !!m && m.publico === 'empresa';
+const PUBLICOS = [
+  { valor: 'dono', titulo: 'Energia solar para o dono', apoio: 'Mostra o potencial de energia solar da casa e da empresa de cada dono.' },
+  { valor: 'empresa', titulo: 'Outra oferta para a empresa', apoio: 'Esconde as notas de energia solar; a ordem é pela força do contato.' },
+];
+const rotuloPublico = (m) => (publicoEmpresa(m) ? 'empresas' : 'donos (energia solar)');
+/* o que só faz sentido no público "dono": filtros e ordens escondidos no público "empresa" */
+const FILTROS_SO_DONO = ['oportunidade', 'solar', 'aptidao_min'];
+const ORDENS_SO_DONO = ['aptidao'];
+const CAMPOS_SO_DONO_PADRAO = ['solar', 'solar_desde', 'solar_kw', 'solar_sistemas', 'solar_onde', 'oportunidade', 'aptidao_solar', 'potencial_casa', 'motivos_casa', 'potencial_empresa', 'motivos_solar'];
+function campoSoDono(chave) {
+  const c = (app.campos || []).find((x) => x.chave === chave);
+  return c ? !!c.so_dono : CAMPOS_SO_DONO_PADRAO.includes(chave);
+}
+/* limpa do estado (filtros f e ordem) o que está escondido no público "empresa"; devolve a ordem válida */
+function limparOcultosDoPublico(m, f, ordem) {
+  if (!publicoEmpresa(m)) return ordem;
+  FILTROS_SO_DONO.forEach((k) => { f[k] = Array.isArray(f[k]) ? [] : 0; });
+  return ORDENS_SO_DONO.includes(ordem) ? 'relevancia' : ordem;
+}
 const cidadeUF = (m) => `${nomeDaLista(m)} · ${regiaoDaLista(m)}`;
 /* localização de um contato de lista por nome: "Cidade · UF" */
 const localDoContato = (l) => [titleCase(l && l.cidade), l && l.uf].filter(Boolean).join(' · ');
