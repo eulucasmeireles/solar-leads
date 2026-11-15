@@ -193,7 +193,18 @@ function nomeAtividades(meta) {
   if (a.length <= 2) return a.map((x) => x.descricao).join(' · ');
   return `${a[0].descricao} e mais ${a.length - 1}`;
 }
-const cidadeUF = (m) => `${titleCase(m.cidade)} · ${m.uf}`;
+/* listas: de cidade (m.cidade + m.uf) ou por nome da empresa (m.palavras, uf vazia = Brasil) */
+const listaPorNome = (m) => Array.isArray(m && m.palavras) && m.palavras.length > 0;
+const nomeDaLista = (m) => (listaPorNome(m) ? m.palavras.map(titleCase).join(' · ') : titleCase(m.cidade));
+const regiaoDaLista = (m) => (listaPorNome(m) ? (m.uf || 'Brasil') : (m.uf || ''));
+/* "lista de Campinas" / "lista “Solar · Fotovolt”" (maiúscula inicial com cap = true) */
+function rotuloLista(m, cap) {
+  const t = listaPorNome(m) ? `lista “${nomeDaLista(m)}”` : `lista de ${nomeDaLista(m)}`;
+  return cap ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+const cidadeUF = (m) => `${nomeDaLista(m)} · ${regiaoDaLista(m)}`;
+/* localização de um contato de lista por nome: "Cidade · UF" */
+const localDoContato = (l) => [titleCase(l && l.cidade), l && l.uf].filter(Boolean).join(' · ');
 
 function saudacao() {
   const hr = new Date().getHours();

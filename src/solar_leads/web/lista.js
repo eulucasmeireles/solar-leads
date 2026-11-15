@@ -25,9 +25,9 @@ const ATALHOS = [
     ativo: (f) => f.pasta === 'fora', liga: (f) => { f.pasta = 'fora'; }, desliga: (f) => { f.pasta = ''; } },
 ];
 const ORDENS = [['relevancia', 'Mais relevantes'], ['aptidao', 'Maior potencial'], ['chance', 'Maior chance de ser o dono'], ['nome', 'Nome (A a Z)'], ['empresa', 'Empresa (A a Z)']];
-const CHAVES_LISTA = ['faixa', 'situacao', 'papel', 'bairro', 'atividade', 'tipo_whatsapp', 'solar', 'oportunidade'];
+const CHAVES_LISTA = ['faixa', 'situacao', 'papel', 'uf', 'cidade', 'bairro', 'atividade', 'tipo_whatsapp', 'solar', 'oportunidade'];
 
-const filtrosPadrao = () => ({ busca: '', faixa: [], situacao: [], solar: [], tipo_whatsapp: [], papel: [], bairro: [], atividade: [], oportunidade: [], pasta: '', aptidao_min: 0, com_email: false, so_disparo: true });
+const filtrosPadrao = () => ({ busca: '', faixa: [], situacao: [], solar: [], tipo_whatsapp: [], papel: [], uf: [], cidade: [], bairro: [], atividade: [], oportunidade: [], pasta: '', aptidao_min: 0, com_email: false, so_disparo: true });
 const copiaFiltros = (f) => JSON.parse(JSON.stringify(f));
 const igualPadrao = (f) => JSON.stringify(f) === JSON.stringify(filtrosPadrao());
 
@@ -71,10 +71,12 @@ const ROTULO_FILTRO = {
   tipo_whatsapp: (v) => ({ pessoal: 'Pessoal', business: 'Comercial' })[v] || 'Não verificado',
   papel: (v) => (v ? titleCase(v) : 'Não informado'),
   oportunidade: (v) => v || 'Não informada',
+  uf: (v) => v || 'Não informado',
+  cidade: (v) => (v ? titleCase(v) : 'Não informada'),
   bairro: (v) => v || 'Não informado',
   atividade: (v) => v || 'Não informada',
 };
-const TITULO_FILTRO = { oportunidade: 'Onde está a oportunidade', faixa: 'Força do contato', situacao: 'Situação do CNPJ', solar: 'Energia solar', tipo_whatsapp: 'WhatsApp', papel: 'Papel do contato', bairro: 'Bairro', atividade: 'Atividade' };
+const TITULO_FILTRO = { oportunidade: 'Onde está a oportunidade', faixa: 'Força do contato', situacao: 'Situação do CNPJ', solar: 'Energia solar', tipo_whatsapp: 'WhatsApp', papel: 'Papel do contato', uf: 'Estado', cidade: 'Cidade', bairro: 'Bairro', atividade: 'Atividade' };
 
 /* ---------- entrada ---------- */
 async function telaLista(raiz, id, subaba, qs) {
@@ -89,18 +91,18 @@ async function telaLista(raiz, id, subaba, qs) {
   }
   if (rota !== app.rota) return;
   raiz.replaceChildren();
-  document.title = `${titleCase(meta.cidade)} · Solar Leads`;
+  document.title = `${nomeDaLista(meta)} · Solar Leads`;
   if (EM_ANDAMENTO(meta)) return viewGerando(raiz, meta, qs);
   if (meta.status === 'erro') return viewErro(raiz, meta);
   return montarLista(raiz, meta, subaba === 'painel' ? 'geral' : 'contatos', qs);
 }
 
 async function gerarDeNovo(meta) {
-  const ok = await confirmar({ titulo: 'Gerar esta lista de novo?', texto: `Vamos criar uma nova lista de ${titleCase(meta.cidade)} com as mesmas escolhas. A lista atual continua guardada.`, ok: 'Gerar de novo' });
+  const ok = await confirmar({ titulo: 'Gerar esta lista de novo?', texto: `Vamos criar uma nova ${rotuloLista(meta)} com as mesmas escolhas. A lista atual continua guardada.`, ok: 'Gerar de novo' });
   if (!ok) return;
   const p = meta.parametros || {};
   try {
-    const r = await api('/api/listas', { method: 'POST', corpo: { uf: meta.uf, cidade: meta.cidade, cnaes: (meta.atividades || []).map((a) => a.codigo), so_ativas: !!p.so_ativas, incluir_mei: !!p.incluir_mei, so_locais: p.so_locais !== false, validar_whatsapp: !!p.validar_whatsapp } });
+    const r = await api('/api/listas', { method: 'POST', corpo: { uf: meta.uf, ...(listaPorNome(meta) ? { palavras: meta.palavras } : { cidade: meta.cidade }), cnaes: (meta.atividades || []).map((a) => a.codigo), so_ativas: !!p.so_ativas, incluir_mei: !!p.incluir_mei, so_locais: p.so_locais !== false, validar_whatsapp: !!p.validar_whatsapp } });
     location.hash = `#/lista/${encodeURIComponent(r.id)}`;
   } catch (e) { avisar(e.message, 'erro'); }
 }
@@ -113,7 +115,7 @@ function cabecalhoDaLista(meta, acoes) {
     h('a', { class: 'link-volta', href: '#/listas' }, icone('esquerda', 16), 'Listas'),
     h('div', { class: 'lista-cab-linha' },
       h('div', { class: 'lista-titulo' },
-        h('h1', {}, titleCase(meta.cidade), h('span', { class: 'uf', text: meta.uf })),
+        h('h1', {}, nomeDaLista(meta), h('span', { class: 'uf', text: regiaoDaLista(meta) })),
         h('p', { class: 'apoio', text: partes.join(' · ') })),
       acoes ? h('div', { class: 'pag-acoes' }, acoes) : null));
 }
@@ -131,7 +133,7 @@ function viewGerando(raiz, meta, qs) {
       const m = await api(`/api/listas/${encodeURIComponent(meta.id)}`);
       if (!vivo) return;
       falhas = 0;
-      if (!EM_ANDAMENTO(m)) { raiz.replaceChildren(); document.title = `${titleCase(m.cidade)} · Solar Leads`; return m.status === 'erro' ? viewErro(raiz, m) : montarLista(raiz, m, 'contatos', qs); }
+      if (!EM_ANDAMENTO(m)) { raiz.replaceChildren(); document.title = `${nomeDaLista(m)} · Solar Leads`; return m.status === 'erro' ? viewErro(raiz, m) : montarLista(raiz, m, 'contatos', qs); }
       etapa.textContent = m.etapa || (m.status === 'na_fila' ? 'Aguardando a vez na fila…' : 'Gerando…');
       titulo.textContent = m.status === 'na_fila' ? 'Sua lista está na fila' : 'Montando sua lista';
     } catch (e) {
@@ -301,6 +303,7 @@ async function montarLista(raiz, meta, abaInicial, qs) {
     const comWhats = (fo.tipo_whatsapp || []).some((o) => o.valor === 'pessoal' || o.valor === 'business');
     corpoFiltros.replaceChildren(
       pil('oportunidade'), pil('faixa'), grupoPasta(), pil('solar'), comWhats ? pil('tipo_whatsapp') : null, pil('situacao'), pil('papel'),
+      (fo.uf || []).length > 1 ? grupoLista('uf', fo.uf) : null, (fo.cidade || []).length > 1 ? grupoLista('cidade', fo.cidade) : null,
       h('fieldset', { class: 'grupo' }, h('legend', { text: 'Potencial mínimo' }), h('div', { class: 'slider' }, apt, aptSaida), h('p', { class: 'dica', text: 'Nota de 0 a 10 do potencial para energia solar.' })),
       (fo.bairro || []).length ? grupoLista('bairro', fo.bairro) : null, (fo.atividade || []).length ? grupoLista('atividade', fo.atividade) : null,
       h('fieldset', { class: 'grupo' }, h('legend', { text: 'Outros' }), h('div', { class: 'grupo-linhas' }, swEmail.el, swDisp.el)));
@@ -332,8 +335,9 @@ async function montarLista(raiz, meta, abaInicial, qs) {
   /* --- mestre-detalhe (componente compartilhado com as pastas) --- */
   const resultado = h('p', { class: 'resultado', 'aria-live': 'polite' });
   const md = criarMestreDetalhe({
+    local: listaPorNome(meta),
     url: (pagina) => `/api/listas/${idUrl}/contatos?${queryDosFiltros(L.f, { ordem: L.ordem, pagina, por_pagina: 50 })}`,
-    perfil: { aoAdicionarPasta: (l, ctx) => { if (ctx && ctx.fechar) ctx.fechar(); abrirAdicionar({ telefones: [l.telefone] }); } },
+    perfil: { local: listaPorNome(meta), aoAdicionarPasta: (l, ctx) => { if (ctx && ctx.fechar) ctx.fechar(); abrirAdicionar({ telefones: [l.telefone] }); } },
     vazio: () => estadoVazio('Nenhum contato com esses filtros', 'Afrouxe algum filtro para ver mais contatos.', h('button', { class: 'btn btn-sec', type: 'button', onclick: limparTudo }, 'Limpar filtros')),
     aoMudar: () => { desenharNumeros(); atualizarExportar(); },
     aoCarregar: (res) => { resultado.textContent = res.total ? `${num(res.total)} contatos` : ''; },
@@ -534,7 +538,7 @@ function criarMestreDetalhe(opc) {
 
   function linha(l, i) {
     return h('button', { class: 'linha-contato' + (i === S.sel ? ' sel' : ''), type: 'button', role: 'listitem', 'aria-current': i === S.sel ? 'true' : null, onclick: () => selecionar(i, true) },
-      avatar(l), h('span', { class: 'lc-tx' }, h('span', { class: 'lc-nome', text: nomeCompleto(l) || 'Contato sem nome' }), h('span', { class: 'lc-emp', text: l.empresa || l.razao_social || '' })), sinaisDoContato(l));
+      avatar(l), h('span', { class: 'lc-tx' }, h('span', { class: 'lc-nome', text: nomeCompleto(l) || 'Contato sem nome' }), h('span', { class: 'lc-emp', text: l.empresa || l.razao_social || '' }), opc.local && localDoContato(l) ? h('span', { class: 'lc-loc', text: localDoContato(l) }) : null), sinaisDoContato(l));
   }
   function desenharLista() {
     if (observador) observador.disconnect();
@@ -634,6 +638,7 @@ function perfilContato(l, opc, ctx) {
   const el = h('div', { class: 'perfil' },
     h('header', { class: 'pf-cab' }, avatar(l, true),
       h('div', {}, h('h2', { text: nome || 'Contato sem nome' }), linhaWhats(l), h('p', { class: 'apoio', text: [l.qualificacao_dono, l.empresa || l.razao_social].filter(Boolean).join(' · ') }),
+        opc.local && localDoContato(l) ? h('p', { class: 'pf-local' }, icone('pin', 14), localDoContato(l)) : null,
         h('div', { class: 'pf-selos' }, seloFaixa(l.faixa, true), o ? selo(l.oportunidade, o.tom, { icone: o.ic }) : null))),
     h('div', { class: 'pf-acoes' },
       dig ? h('a', { class: 'btn btn-prim', href: `https://wa.me/${dig}`, target: '_blank', rel: 'noopener noreferrer' }, icone('whatsapp', 18), 'Abrir no WhatsApp') : null,

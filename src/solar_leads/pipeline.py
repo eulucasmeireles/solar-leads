@@ -128,7 +128,7 @@ def montar(
     for l in linhas:
         l["porte"] = PORTE.get((l["porte"] or "").strip().zfill(2), "") if l["porte"] else ""
         l["tags"] = ",".join(
-            ["solar", f"faixa-{l['faixa'].lower()}", slug(cidade), f"fonte-{slug(l['fonte'])}"]
+            ["solar", f"faixa-{l['faixa'].lower()}", slug(cidade or l["cidade"]), f"fonte-{slug(l['fonte'])}"]
             + ([f"cnpj-{l['situacao']}"] if l["situacao"] else [])
             + (["ja-tem-solar"] if l["solar"] not in ("sem registro", "dono: indício fraco") else [])
         )

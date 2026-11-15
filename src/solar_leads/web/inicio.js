@@ -10,7 +10,7 @@ function cartaoLista(m, aoExcluir) {
   const r = m.resumo;
   let corpo;
   if (andamento) {
-    corpo = h('div', { class: 'cl-andamento' }, progresso(null, `Gerando lista de ${titleCase(m.cidade)}`),
+    corpo = h('div', { class: 'cl-andamento' }, progresso(null, `Gerando ${rotuloLista(m)}`),
       h('p', { class: 'cl-etapa', text: m.etapa || (m.status === 'na_fila' ? 'Aguardando a vez na fila…' : 'Começando…') }));
   } else if (m.status === 'erro') {
     corpo = h('p', { class: 'cl-erro', text: m.erro || 'Algo deu errado ao gerar esta lista.' });
@@ -20,12 +20,12 @@ function cartaoLista(m, aoExcluir) {
       anel({ valor: forte, texto: `${Math.round(forte)}%`, cor: '--verde', tam: 56, espessura: 5, rotulo: `${Math.round(forte)}% de contatos fortes` }),
       h('div', {}, h('div', { class: 'cl-contatos', text: `${num(r.contatos_para_disparo)} contatos` }), h('div', { class: 'cl-sub', text: `${num(r.faixa_A)} fortes` })));
   }
-  const link = h('a', { class: 'cl-link', href: `#/lista/${encodeURIComponent(m.id)}` }, titleCase(m.cidade));
+  const link = h('a', { class: 'cl-link', href: `#/lista/${encodeURIComponent(m.id)}` }, nomeDaLista(m));
   const menu = criarMenu(icone('pontos', 20), [{ rotulo: 'Excluir lista', icone: 'lixeira', perigo: true, aoClicar: () => aoExcluir(m) }],
-    { classeBotao: 'btn-icone', rotulo: `Mais opções da lista de ${titleCase(m.cidade)}` });
+    { classeBotao: 'btn-icone', rotulo: `Mais opções da ${rotuloLista(m)}` });
   menu.classList.add('cl-menu');
   return h('article', { class: 'cartao cartao-lista' + (andamento ? ' em-andamento' : '') },
-    h('header', { class: 'cl-topo' }, h('h3', {}, link, h('span', { class: 'uf', text: m.uf })), menu),
+    h('header', { class: 'cl-topo' }, h('h3', {}, link, h('span', { class: 'uf', text: regiaoDaLista(m) })), menu),
     h('p', { class: 'cl-ativ', text: nomeAtividades(m) }),
     corpo || null,
     h('footer', { class: 'cl-rodape' }, andamento || m.status === 'erro' ? seloStatus(m.status) : null,
@@ -35,7 +35,7 @@ function cartaoLista(m, aoExcluir) {
 async function excluirLista(m, aposExcluir) {
   const ok = await confirmar({
     titulo: 'Excluir esta lista?',
-    texto: `A lista de ${titleCase(m.cidade)} (${m.uf}) será apagada de vez. Você pode gerá-la de novo quando quiser.`,
+    texto: `A ${rotuloLista(m)} (${regiaoDaLista(m)}) será apagada de vez. Você pode gerá-la de novo quando quiser.`,
     ok: 'Excluir', perigo: true,
   });
   if (!ok) return;
@@ -58,8 +58,8 @@ function vigiarListas(desenhar, aoErro) {
         ultimo = sig; desenhar(lista);
         lista.forEach((m) => {
           const a = anterior.get(m.id);
-          if (a && a.status !== m.status && m.status === 'pronta') live.textContent = `Lista de ${titleCase(m.cidade)} pronta.`;
-          else if (EM_ANDAMENTO(m) && m.etapa && (!a || a.etapa !== m.etapa)) live.textContent = `${titleCase(m.cidade)}: ${m.etapa}`;
+          if (a && a.status !== m.status && m.status === 'pronta') live.textContent = `${rotuloLista(m, true)} pronta.`;
+          else if (EM_ANDAMENTO(m) && m.etapa && (!a || a.etapa !== m.etapa)) live.textContent = `${nomeDaLista(m)}: ${m.etapa}`;
         });
         anterior = new Map(lista.map((m) => [m.id, m]));
       }
@@ -136,6 +136,135 @@ function folhaNovaLista(cidade) {
   const m = abrirModal(painel);
 }
 
+/* ---------- folha "Lista por nome da empresa" ---------- */
+let ufsCache = null;
+
+function folhaPorNome() {
+  const E = { palavras: [], uf: '', previa: null, marcadas: new Set(), so_ativas: true, incluir_mei: false, busca: 0 };
+  const idT = uid('folha');
+  const chips = h('div', { class: 'chips', hidden: true });
+  const campo = h('input', { type: 'text', id: uid('palavras'), placeholder: 'Ex.: solar, fotovolt', autocomplete: 'off', spellcheck: 'false', maxlength: '40', 'aria-label': 'Palavras do nome da empresa', 'data-foco': '' });
+  const seletorUF = h('select', { id: uid('regiao'), 'aria-label': 'Região' }, h('option', { value: '', text: 'Brasil inteiro' }));
+  (ufsCache ? Promise.resolve(ufsCache) : api('/api/ufs')).then((u) => { ufsCache = u; seletorUF.append(...u.map((x) => h('option', { value: x, text: x }))); seletorUF.value = E.uf; }).catch(() => {});
+  const zonaPrevia = h('section', { class: 'folha-sec', hidden: true, 'aria-live': 'polite' });
+  const erro = h('p', { class: 'erro-inline', role: 'alert' });
+  const btnVer = h('button', { class: 'btn btn-sec', type: 'button' }, 'Ver empresas');
+  const btnGerar = h('button', { class: 'btn btn-prim btn-grande', type: 'button', disabled: true }, 'Gerar lista');
+
+  function invalidar() {
+    E.busca += 1; E.previa = null; E.marcadas = new Set();
+    zonaPrevia.hidden = true; zonaPrevia.replaceChildren();
+    btnGerar.disabled = true; erro.textContent = '';
+    btnVer.disabled = !E.palavras.length; btnVer.replaceChildren('Ver empresas');
+  }
+  function desenharChips() {
+    chips.hidden = !E.palavras.length;
+    chips.replaceChildren(...E.palavras.map((p) => chip(p, () => { E.palavras = E.palavras.filter((x) => x !== p); desenharChips(); invalidar(); }, `Remover palavra ${p}`)));
+  }
+  function adicionar() {
+    const novas = campo.value.split(',').map((x) => x.trim().toLowerCase()).filter((x) => x && !E.palavras.includes(x));
+    campo.value = '';
+    if (!novas.length) return;
+    E.palavras.push(...novas); desenharChips(); invalidar();
+  }
+  campo.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); adicionar(); } else if (e.key === 'Backspace' && !campo.value && E.palavras.length) { E.palavras.pop(); desenharChips(); invalidar(); } });
+  campo.addEventListener('input', () => { if (campo.value.includes(',')) adicionar(); });
+  campo.addEventListener('blur', adicionar);
+  seletorUF.addEventListener('change', () => { E.uf = seletorUF.value; invalidar(); });
+  desenharChips();
+
+  const soma = h('p', { class: 'prev-soma' });
+  function desenharSoma() {
+    const itens = E.previa.atividades;
+    if (!E.marcadas.size) { soma.textContent = 'Nenhuma marcada: entram todas as atividades.'; return; }
+    const n = itens.filter((a) => E.marcadas.has(a.codigo)).reduce((t, a) => t + a.n, 0);
+    soma.textContent = `${num(n)} ${n === 1 ? 'empresa' : 'empresas'} nas ${num(E.marcadas.size)} ${E.marcadas.size === 1 ? 'atividade marcada' : 'atividades marcadas'}`;
+  }
+  function desenharPrevia() {
+    const p = E.previa;
+    zonaPrevia.hidden = false;
+    if (p.demais) {
+      zonaPrevia.replaceChildren(h('div', { class: 'nota nota-laranja', role: 'note' }, icone('info', 18), h('span', { text: 'Essas palavras são genéricas demais e trazem empresas demais. Use uma palavra mais específica ou escolha um estado.' })));
+      btnGerar.disabled = true; return;
+    }
+    if (!p.total) {
+      zonaPrevia.replaceChildren(h('p', { class: 'apoio', text: 'Nenhuma empresa encontrada. Tente outras palavras ou outra região.' }));
+      btnGerar.disabled = true; return;
+    }
+    const ul = h('ul', { class: 'opcoes-lista opcoes-prev' }, p.atividades.map((a) => {
+      const idc = uid('a');
+      const cb = h('input', { type: 'checkbox', id: idc });
+      cb.addEventListener('change', () => { if (cb.checked) E.marcadas.add(a.codigo); else E.marcadas.delete(a.codigo); desenharSoma(); });
+      return h('li', {}, h('label', { for: idc }, cb, h('span', { class: 'opt-tx', text: a.descricao }), h('span', { class: 'opt-n', text: num(a.n) })));
+    }));
+    zonaPrevia.replaceChildren(
+      h('div', { class: 'prev-total' }, h('strong', { text: num(p.total) }), h('span', { text: p.total === 1 ? 'empresa' : 'empresas' })),
+      p.atividades.length ? h('h3', { text: 'Atividades' }) : null,
+      p.atividades.length ? h('p', { class: 'dica', text: 'Marque as atividades que interessam. Sem marcar nenhuma, entram todas.' }) : null,
+      p.atividades.length ? ul : null, p.atividades.length ? soma : null);
+    if (p.atividades.length) desenharSoma();
+    btnGerar.disabled = false;
+  }
+  btnVer.disabled = true;
+  btnVer.addEventListener('click', async () => {
+    adicionar();
+    if (!E.palavras.length) return;
+    const meu = ++E.busca;
+    erro.textContent = ''; btnVer.disabled = true; btnGerar.disabled = true;
+    btnVer.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Procurando…');
+    zonaPrevia.hidden = false;
+    zonaPrevia.replaceChildren(h('p', { class: 'apoio', text: E.uf ? 'Procurando empresas no estado…' : 'Procurando no Brasil inteiro. Pode levar alguns segundos.' }), progresso(null, 'Procurando empresas'));
+    zonaPrevia.scrollIntoView({ block: 'nearest' });
+    const q = new URLSearchParams();
+    E.palavras.forEach((x) => q.append('palavra', x));
+    q.set('uf', E.uf); q.set('so_ativas', E.so_ativas ? '1' : '0'); q.set('incluir_mei', E.incluir_mei ? '1' : '0');
+    try {
+      const p = await api(`/api/publico?${q.toString()}`);
+      if (meu !== E.busca) return;
+      E.previa = p; E.marcadas = new Set();
+      btnVer.disabled = false; btnVer.replaceChildren('Ver empresas de novo');
+      desenharPrevia();
+      /* o resultado nasce abaixo da dobra da folha: leva a pessoa até ele */
+      zonaPrevia.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+    } catch (e) {
+      if (meu !== E.busca) return;
+      zonaPrevia.hidden = true; zonaPrevia.replaceChildren();
+      erro.textContent = e.message; btnVer.disabled = false; btnVer.replaceChildren('Ver empresas');
+    }
+  });
+  const sw = (rotulo, desc, chave) => interruptor({ rotulo, descricao: desc, checked: E[chave], aoMudar: (v) => { E[chave] = v; if (E.previa) { invalidar(); erro.textContent = 'Opções alteradas. Veja as empresas de novo.'; } } }).el;
+
+  btnGerar.addEventListener('click', async () => {
+    if (!E.previa || E.previa.demais) return;
+    btnGerar.disabled = true; erro.textContent = '';
+    btnGerar.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Enviando…');
+    try {
+      const r = await api('/api/listas', { method: 'POST', corpo: {
+        palavras: E.palavras.slice(), uf: E.uf, cnaes: [...E.marcadas], so_ativas: E.so_ativas, incluir_mei: E.incluir_mei, so_locais: true, validar_whatsapp: false,
+      } });
+      m.fechar();
+      location.hash = `#/lista/${encodeURIComponent(r.id)}`;
+    } catch (e) { erro.textContent = e.message; btnGerar.disabled = false; btnGerar.replaceChildren('Gerar lista'); }
+  });
+  /* mudar as opções depois de ver as empresas pede nova prévia; o texto de aviso fica no erro-inline */
+  const painel = h('div', { class: 'folha', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': idT, tabindex: '-1' },
+    h('header', { class: 'folha-cab' },
+      h('div', {}, h('h2', { id: idT, text: 'Lista por nome da empresa' }), h('p', { class: 'apoio', text: 'Para achar empresas de um ramo pelo nome, em qualquer lugar do país.' })),
+      h('button', { class: 'btn-icone', type: 'button', 'aria-label': 'Fechar', onclick: () => m.fechar() }, icone('x', 20))),
+    h('div', { class: 'folha-corpo' },
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Palavras do nome' }), campo, chips,
+        h('p', { class: 'dica', text: 'Entram as empresas que têm qualquer uma dessas palavras no nome ou na razão social.' })),
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Região' }), seletorUF),
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Opções' }),
+        h('div', { class: 'grupo-linhas' },
+          sw('Só empresas ativas', 'Deixa de fora CNPJs baixados, suspensos ou inaptos.', 'so_ativas'),
+          sw('Incluir MEI', 'Microempreendedores individuais entram na lista.', 'incluir_mei'))),
+      h('div', {}, btnVer),
+      zonaPrevia),
+    h('footer', { class: 'folha-rodape' }, erro, btnGerar));
+  const m = abrirModal(painel);
+}
+
 /* ---------- Início ---------- */
 function telaInicio(raiz) {
   document.title = 'Início · Solar Leads';
@@ -154,7 +283,8 @@ function telaInicio(raiz) {
     h('p', { class: 'saud', text: saudacao() }),
     h('h1', { text: 'Onde vamos prospectar hoje?' }),
     h('p', { class: 'apoio', text: 'Escolha uma cidade e montamos a lista de contatos.' }),
-    h('label', { class: 'so-leitor', for: combo.input.id, text: 'Cidade' }), combo.el, faixaNumeros);
+    h('label', { class: 'so-leitor', for: combo.input.id, text: 'Cidade' }), combo.el,
+    h('button', { class: 'link-btn link-nome', type: 'button', onclick: folhaPorNome }, 'Ou procure empresas pelo nome, no Brasil inteiro', icone('direita', 14)), faixaNumeros);
 
   function desenharRecentes(lista) {
     if (!lista.length) { gradeRecentes.replaceChildren(estadoVazio('Nenhuma lista ainda', 'Escolha uma cidade acima para gerar a primeira.', null, 'listas')); return; }
@@ -183,13 +313,13 @@ function telaListas(raiz) {
   document.title = 'Listas · Solar Leads';
   const grade = h('div', { class: 'grade-listas' }, esqueletoCartoes(6));
   let todas = [];
-  const busca = h('input', { type: 'search', id: 'busca-listas', placeholder: 'Buscar por cidade…', autocomplete: 'off', 'aria-label': 'Buscar lista por cidade' });
+  const busca = h('input', { type: 'search', id: 'busca-listas', placeholder: 'Buscar por cidade ou nome…', autocomplete: 'off', 'aria-label': 'Buscar lista por cidade ou nome' });
   const norm = (t) => String(t).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   function desenhar() {
     const q = norm(busca.value.trim());
-    const lista = todas.filter((m) => !q || norm(`${m.cidade} ${m.uf}`).includes(q));
+    const lista = todas.filter((m) => !q || norm(`${nomeDaLista(m)} ${regiaoDaLista(m)}`).includes(q));
     if (!lista.length) {
-      grade.replaceChildren(todas.length ? estadoVazio('Nenhuma lista com esse nome', 'Tente outra cidade ou limpe a busca.', null) : estadoVazio('Nenhuma lista ainda', 'Gere a primeira escolhendo uma cidade no Início.', h('a', { class: 'btn btn-prim', href: '#/' }, 'Ir para o Início'), 'listas'));
+      grade.replaceChildren(todas.length ? estadoVazio('Nenhuma lista com esse nome', 'Tente outro nome ou limpe a busca.', null) : estadoVazio('Nenhuma lista ainda', 'Gere a primeira escolhendo uma cidade no Início.', h('a', { class: 'btn btn-prim', href: '#/' }, 'Ir para o Início'), 'listas'));
       return;
     }
     grade.replaceChildren(...lista.map((m) => cartaoLista(m, (x) => excluirLista(x, recarregar))));

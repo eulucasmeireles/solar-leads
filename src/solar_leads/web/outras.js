@@ -75,7 +75,7 @@ async function telaWhatsapp(raiz) {
       const lista = S.listas.find((m) => m.id === v.lista_id);
       const quanto = Math.min(100, (v.feitos_hoje || 0) / 3000 * 100);
       zonaVerif.replaceChildren(h('section', { class: 'cartao' },
-        ajuste({ icone: 'sparkle', tom: 'laranja', titulo: 'Verificando números', descricao: lista ? `Lista de ${cidadeUF(lista)}` : 'Em andamento', valor: selo('Rodando', 'laranja', { ponto: true }) }),
+        ajuste({ icone: 'sparkle', tom: 'laranja', titulo: 'Verificando números', descricao: lista ? `${rotuloLista(lista, true)} · ${regiaoDaLista(lista)}` : 'Em andamento', valor: selo('Rodando', 'laranja', { ponto: true }) }),
         h('div', { class: 'verif-roda' },
           h('div', { class: 'mini-nums' },
             h('div', { class: 'mini-num' }, h('div', { class: 'mini-num-v', text: num(v.feitos_hoje) }), h('div', { class: 'mini-num-r', text: 'feitos hoje' })),

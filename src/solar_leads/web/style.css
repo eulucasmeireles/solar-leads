@@ -640,3 +640,15 @@ input:focus-visible, select:focus-visible { outline: 0; border-color: var(--acen
 [data-demo] .folha .grupo-linhas::after, [data-demo] .filtros .grupo-linhas::after { display: none; }
 [data-demo] .textarea { filter: blur(5px); }
 .dialogo-acoes-col .btn { white-space: normal; text-align: center; padding-top: 10px; padding-bottom: 10px; }
+
+/* listas por nome da empresa */
+.lc-loc { font-size: 12.5px; color: var(--txt3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-local { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 14px; color: var(--txt2); }
+.link-nome { white-space: normal; text-align: left; padding-left: 0; display: inline-flex; align-items: center; gap: 4px; margin-top: 14px; font-size: 14.5px; color: var(--txt2); }
+.link-nome:hover { color: var(--txt); }
+.prev-total { display: flex; align-items: baseline; gap: 8px; }
+.prev-total strong { font-size: 34px; font-weight: 300; letter-spacing: -.02em; }
+.prev-total span { color: var(--txt2); }
+.opcoes-prev { max-height: 300px; margin-top: 4px; }
+.prev-soma { font-size: 14px; color: var(--txt2); }
+.folha-sec .chips[hidden] { display: none; }

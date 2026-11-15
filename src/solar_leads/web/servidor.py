@@ -471,9 +471,15 @@ def parar_verificacao() -> dict:
 
 # ---------- geração ----------
 
+Lista = Annotated[list[str] | None, Query()]
+
 class NovaLista(BaseModel):
-    uf: str
-    cidade: str
+    """Lista de uma cidade (`uf` + `cidade`) ou, com `palavras`, das empresas de um estado
+    (ou do país, sem `uf`) que têm uma dessas palavras no nome."""
+
+    uf: str = ""
+    cidade: str = ""
+    palavras: list[str] = []
     cnaes: list[str] = []
     so_ativas: bool = False
     incluir_mei: bool = False
@@ -489,13 +495,14 @@ def _gerar(meta: dict, codigo: str) -> None:
     try:
         meta["status"] = "gerando"
         p = meta["parametros"]
+        amplo = bool(meta.get("palavras"))  # lista por nome da empresa, num estado ou no país
         con = cnpj_db.conectar()
         try:
             leads = enriquecer.enriquecer(
-                con, [], codigo, meta["uf"], cidade=meta["cidade"].title(),
+                con, [], codigo, meta["uf"], cidade="" if amplo else meta["cidade"].title(),
                 cnaes=[a["codigo"] for a in meta["atividades"]] or [""],
                 so_ativas=p["so_ativas"], incluir_mei=p["incluir_mei"], so_locais=p.get("so_locais", True),
-                progresso=etapa,
+                palavras=meta.get("palavras") or None, progresso=etapa,
             )
             etapa("Aproveitando os WhatsApp já verificados")
             # Sempre aproveita o que já foi verificado; consulta o resto só quando pedido.
@@ -509,7 +516,7 @@ def _gerar(meta: dict, codigo: str) -> None:
         finally:
             con.close()
         etapa("Montando a lista")
-        linhas, disparo = pipeline.montar(leads, meta["cidade"], tem_whatsapp)
+        linhas, disparo = pipeline.montar(leads, "" if amplo else meta["cidade"], tem_whatsapp)
         pipeline.salvar_parquet(linhas, LISTAS / f"{meta['id']}.parquet")
         meta["resumo"] = pipeline.resumir(linhas, disparo, whatsapp_verificado=bool(tem_whatsapp))
         # Os números do cartão saem da mesma consulta que a tela usa, para os dois baterem.
@@ -537,17 +544,102 @@ def _atender_fila() -> None:
 threading.Thread(target=_atender_fila, daemon=True).start()
 
 
+def _palavras(brutas: list[str]) -> list[str]:
+    """Palavras de busca no nome da empresa: sem repetição, sem acento, de 3 a 40 letras, no máximo 10."""
+    limpas = sorted({" ".join(p.split()).upper() for p in brutas} - {""})
+    if any(len(p) < 3 or len(p) > 40 for p in limpas):
+        raise HTTPException(400, "Cada palavra precisa ter de 3 a 40 letras.")
+    if len(limpas) > 10:
+        raise HTTPException(400, "Use no máximo 10 palavras.")
+    return limpas
+
+
+def _uf_valida(uf: str) -> str:
+    uf = uf.strip().upper()
+    if uf and uf not in ufs():
+        raise HTTPException(404, "Estado não encontrado na base.")
+    return uf
+
+
+def _rotulo(meta: dict) -> str:
+    """Nome curto da lista: "Montes Claros/MG" ou, na lista por nome, "Solar · Fotovolt (Brasil)"."""
+    if meta.get("palavras"):
+        return f"{' · '.join(p.title() for p in meta['palavras'])} ({meta['uf'] or 'Brasil'})"
+    return f"{meta['cidade'].title()}/{meta['uf']}"
+
+
+@app.get("/api/publico")
+def previa_do_publico(
+    palavra: Lista = None, uf: str = "", so_ativas: int = 1, incluir_mei: int = 0,
+) -> dict:
+    """Quantas empresas (sedes) têm as palavras no nome, por atividade e por estado.
+
+    Serve para escolher as atividades antes de gerar: "solar" também está no nome de condomínios e usinas.
+    """
+    palavras, uf = _palavras(palavra or []), _uf_valida(uf)
+    if not palavras:
+        raise HTTPException(400, "Informe ao menos uma palavra.")
+
+    def calcular() -> dict:
+        nome = "strip_accents(upper(coalesce(razao_social, '') || ' ' || coalesce(nome_fantasia, '')))"
+        cond = " OR ".join(f"contains({nome}, strip_accents(?))" for _ in palavras)
+        extra, params = "", list(palavras)
+        if uf:
+            extra += " AND uf = ?"
+            params.append(uf)
+        if so_ativas:
+            extra += " AND situacao = '02'"
+        if not incluir_mei:
+            extra += " AND NOT mei"
+        con = cnpj_db.conectar(tentativas=2)
+        try:
+            linhas = con.execute(
+                f"""
+                SELECT cnae_fiscal, any_value(cnae_descricao), uf, count(*) FROM estab_cidade
+                WHERE ({cond}) {extra} AND matriz_filial = '1' AND coalesce(natureza_juridica, '') NOT LIKE '1%'
+                GROUP BY cnae_fiscal, uf
+                """,
+                params,
+            ).fetchall()
+        finally:
+            con.close()
+        atividades: dict[str, list] = {}
+        estados: dict[str, int] = {}
+        for cnae, descricao, estado, n in linhas:
+            atividades.setdefault(cnae or "", [descricao or "", 0])[1] += n
+            estados[estado] = estados.get(estado, 0) + n
+        total = sum(estados.values())
+        return {
+            "total": total,
+            "demais": total > enriquecer.MAX_EMPRESAS_POR_NOME,
+            "atividades": [
+                {"codigo": c, "descricao": d, "n": n}
+                for c, (d, n) in sorted(atividades.items(), key=lambda a: (-a[1][1], a[0]))[:60]
+            ],
+            "estados": [{"uf": e, "n": n} for e, n in sorted(estados.items(), key=lambda a: (-a[1], a[0]))],
+        }
+
+    return _em_cache(f"publico:{'|'.join(palavras)}:{uf}:{so_ativas}:{incluir_mei}", 600, calcular)
+
+
 @app.post("/api/listas")
 def criar_lista(pedido: NovaLista) -> dict:
     con = duckdb.connect()
-    achado = con.execute(
-        f"SELECT codigo, exibicao, empresas FROM read_parquet('{_municipios()}') "
-        "WHERE uf = ? AND nome = strip_accents(upper(?))",
-        [pedido.uf.upper(), pedido.cidade.strip()],
-    ).fetchone()
-    if not achado:
-        raise HTTPException(404, "Cidade não encontrada na base.")
     cnaes = sorted({"".join(c for c in x if c.isdigit()) for x in pedido.cnaes} - {""})
+    palavras = _palavras(pedido.palavras)
+    if palavras:
+        uf = _uf_valida(pedido.uf)
+        # achado: (código do município, nome da lista, nº de empresas) — aqui não há município.
+        achado = ("", " · ".join(palavras), 0)
+    else:
+        uf = pedido.uf.upper()
+        achado = con.execute(
+            f"SELECT codigo, exibicao, empresas FROM read_parquet('{_municipios()}') "
+            "WHERE uf = ? AND nome = strip_accents(upper(?))",
+            [uf, pedido.cidade.strip()],
+        ).fetchone()
+        if not achado:
+            raise HTTPException(404, "Cidade não encontrada na base.")
     if achado[2] > LIMITE_SEM_ATIVIDADE and not cnaes:
         raise HTTPException(
             400,
@@ -562,14 +654,15 @@ def criar_lista(pedido: NovaLista) -> dict:
         ).fetchall()
     )
     agora = datetime.now()
-    id_ = f"{agora:%Y%m%d-%H%M%S}-{pipeline.slug(achado[1])}-{pedido.uf.lower()}"
+    id_ = f"{agora:%Y%m%d-%H%M%S}-{pipeline.slug(achado[1])[:40]}-{uf.lower() or 'br'}"
     while (LISTAS / f"{id_}.json").exists():
         id_ += "b"
     meta = {
         "id": id_,
         "criada_em": agora.isoformat(timespec="seconds"),
         "cidade": achado[1],
-        "uf": pedido.uf.upper(),
+        "uf": uf,
+        "palavras": palavras,
         "atividades": [{"codigo": c, "descricao": descricoes.get(c, c)} for c in cnaes],
         "parametros": {
             "so_ativas": pedido.so_ativas, "incluir_mei": pedido.incluir_mei, "so_locais": pedido.so_locais,
@@ -609,8 +702,7 @@ def excluir(id_: str) -> dict:
 
 # ---------- consulta ----------
 
-Lista = Annotated[list[str] | None, Query()]
-_FILTROS_IN = ("faixa", "situacao", "papel", "bairro", "atividade", "tipo_whatsapp", "solar", "oportunidade")
+_FILTROS_IN = ("faixa", "situacao", "papel", "bairro", "atividade", "tipo_whatsapp", "solar", "oportunidade", "uf", "cidade")
 _ORDENS = {
     "relevancia": "ordem",
     "aptidao": "aptidao_solar DESC, ordem",
@@ -640,7 +732,7 @@ def _consulta(
         cond.append("email <> ''")
     if busca.strip():
         cond.append(
-            "strip_accents(lower(concat_ws(' ', primeiro_nome, sobrenome, empresa, razao_social, cnpj, telefone, bairro))) "
+            "strip_accents(lower(concat_ws(' ', primeiro_nome, sobrenome, empresa, razao_social, cnpj, telefone, bairro, cidade))) "
             "LIKE '%' || strip_accents(lower(?)) || '%'"
         )
         params.append(busca.strip())
@@ -675,12 +767,13 @@ class Filtros:
         self,
         faixa: Lista = None, situacao: Lista = None, papel: Lista = None, bairro: Lista = None,
         atividade: Lista = None, tipo_whatsapp: Lista = None, solar: Lista = None, oportunidade: Lista = None,
+        uf: Lista = None, cidade: Lista = None,
         aptidao_min: int | None = None, com_email: int = 0, so_disparo: int = 1, busca: str = "",
         ordem: str = "relevancia", pasta: str | None = None,
     ) -> None:
         self.em = {
             "faixa": faixa, "situacao": situacao, "papel": papel, "bairro": bairro, "atividade": atividade,
-            "tipo_whatsapp": tipo_whatsapp, "solar": solar, "oportunidade": oportunidade,
+            "tipo_whatsapp": tipo_whatsapp, "solar": solar, "oportunidade": oportunidade, "uf": uf, "cidade": cidade,
         }
         self.aptidao_min, self.com_email, self.so_disparo, self.busca = aptidao_min, com_email, so_disparo, busca
         self.ordem = _ORDENS.get(ordem, "ordem")
@@ -700,7 +793,7 @@ def opcoes_de_filtro(id_: str, so_disparo: int = 1) -> dict:
         con.executemany("INSERT INTO fora VALUES (?)", [(t,) for t in bloqueados])
     saida = {}
     for campo in _FILTROS_IN:
-        limite = 400 if campo in ("bairro", "atividade") else 50
+        limite = 400 if campo in ("bairro", "atividade", "cidade") else 50
         if so_disparo:
             # Mesma regra da tela: filtra pela opção e só depois tira os repetidos,
             # para o número ao lado de cada opção bater com o que aparece ao marcá-la.
@@ -807,8 +900,8 @@ def exportar(id_: str, f: Annotated[Filtros, Depends()], request: Request) -> St
     sel = ", ".join(pipeline.CHAVES)
     linhas = duckdb.connect().execute(f"{cte} SELECT {sel} FROM r ORDER BY {f.ordem}", params).fetchall()
     meta = _ler_meta(id_)
-    pastas.registrar_exportacao("lista", id_, f"Lista de {meta['cidade'].title()}/{meta['uf']}", len(linhas), _ip(request))
-    return _csv(linhas, f"solar-leads-{pipeline.slug(meta['cidade'])}-{meta['uf'].lower()}-{datetime.now():%Y%m%d-%H%M}.csv")
+    pastas.registrar_exportacao("lista", id_, f"Lista de {_rotulo(meta)}", len(linhas), _ip(request))
+    return _csv(linhas, f"solar-leads-{pipeline.slug(meta['cidade'])[:40]}-{meta['uf'].lower() or 'br'}-{datetime.now():%Y%m%d-%H%M}.csv")
 
 
 # ---------- pastas ----------
@@ -881,7 +974,7 @@ def adicionar_a_pasta(
         cte, params = f.consulta(arquivo, "fora" if pular_em_pastas and not f.pasta else None)
         limite = f"LIMIT {int(quantidade)}" if quantidade > 0 else ""
         linhas = _linhas(con.execute(f"{cte} SELECT * EXCLUDE (dono_chave, ordem) FROM r ORDER BY {f.ordem} {limite}", params))
-    novos, ja = pastas.adicionar(pasta_id, linhas, lista_id, f"{meta['cidade'].title()}/{meta['uf']}")
+    novos, ja = pastas.adicionar(pasta_id, linhas, lista_id, _rotulo(meta))
     return {"adicionados": novos, "ja_estavam": ja, "total_na_pasta": _pasta(pasta_id)["contatos"]}
 
 
@@ -914,7 +1007,7 @@ def dividir_em_pastas(
         if not parte:
             break  # acabaram os contatos: não cria pasta vazia
         pasta_id = pastas.criar(nome)
-        novos, _ = pastas.adicionar(pasta_id, parte, lista_id, f"{meta['cidade'].title()}/{meta['uf']}")
+        novos, _ = pastas.adicionar(pasta_id, parte, lista_id, _rotulo(meta))
         criadas.append({"id": pasta_id, "nome": nome, "contatos": novos})
         total += novos
     return {"pastas": criadas, "adicionados": total}

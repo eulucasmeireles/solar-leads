@@ -10,11 +10,11 @@ from datetime import date, datetime
 import duckdb
 from rapidfuzz import fuzz
 
-from . import aneel, cnpj_db
+from . import aneel, cnpj_db, config
 from .qualificacao import (
     LIMITE_CONTADOR, QUALIF_DONO, aptidao_solar, oportunidade, pontuar_contato, potencial_da_pessoa,
 )
-from .telefone import e164, e_celular, suspeito
+from .telefone import DDDS_POR_UF, e164, e_celular, suspeito
 
 _SUFIXOS = re.compile(r"\b(LTDA|ME|EPP|EIRELI|S\s?A|MEI|CIA|COMERCIO|COMERCIAL|E|DE|DA|DO|DAS|DOS)\b")
 _NAO_ALFANUM = re.compile(r"[^A-Z0-9]+")
@@ -34,6 +34,7 @@ EMAIL_PESSOAL = (
 )
 ENDERECO_COMPARTILHADO = 10  # a partir disso o endereço é galeria, prédio comercial ou escritório virtual
 _EMAIL = re.compile(r"^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$")
+MAX_EMPRESAS_POR_NOME = 300_000  # acima disso a palavra é genérica demais ("LTDA", "COMERCIO")
 DESCONTO_NAO_ATIVA = 0.15  # no cruzamento com o Maps, um CNPJ ativo equivalente ganha do encerrado
 
 
@@ -139,6 +140,74 @@ def carregar_municipio(con: duckdb.DuckDBPyConnection, codigo: str, uf: str, so_
     )
 
 
+def _titulo_de_cidade(nome: str | None) -> str:
+    """"RIO DE JANEIRO" -> "Rio de Janeiro"."""
+    palavras = (nome or "").title().split()
+    return " ".join(p.lower() if i and p in ("De", "Da", "Do", "Das", "Dos", "E", "D'") else p for i, p in enumerate(palavras))
+
+
+def carregar_por_nome(con: duckdb.DuckDBPyConnection, palavras: list[str], uf: str = "", so_ativas: bool = False) -> int:
+    """Materializa em `estab_mun` os estabelecimentos de um estado (ou do país, sem `uf`) cujo
+    nome (razão social ou fantasia) contém alguma das palavras. Devolve quantos são.
+
+    Além das colunas de sempre, cada linha traz `uf` e `cidade`, porque a lista cobre vários municípios.
+    """
+    if not cnpj_db.tem_tabela(con, "estab_cidade"):
+        raise RuntimeError("A busca por nome usa a tabela nacional: rode `leads base cidades` antes.")
+    termos = sorted({p.strip() for p in palavras if len(p.strip()) >= 3})
+    if not termos:
+        raise ValueError("Informe ao menos uma palavra com 3 letras ou mais.")
+    nome = "strip_accents(upper(coalesce(e.razao_social, '') || ' ' || coalesce(e.nome_fantasia, '')))"
+    cond = " OR ".join(f"contains({nome}, strip_accents(upper(?)))" for _ in termos)
+    filtro, params = "", list(termos)
+    if uf:
+        filtro += " AND e.uf = ?"
+        params.append(uf.upper())
+    if so_ativas:
+        filtro += " AND e.situacao = '02'"
+    # Nome do município com acento, quando a tabela de apoio da página já existe.
+    apoio = config.DADOS / "municipios_uf.parquet"
+    if apoio.exists():
+        cidade = "coalesce(x.exibicao, m.descricao)"
+        juncao = f"LEFT JOIN read_parquet('{apoio}') x ON x.uf = e.uf AND x.codigo = e.municipio"
+    else:
+        cidade, juncao = "m.descricao", ""
+    con.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE estab_nome AS
+        SELECT e.* EXCLUDE (municipio), {cidade} AS cidade
+        FROM estab_cidade e LEFT JOIN municipios m ON m.codigo = e.municipio {juncao}
+        WHERE ({cond}) {filtro}
+        """,
+        params,
+    )
+    n = con.execute("SELECT count(*) FROM estab_nome").fetchone()[0]
+    if n > MAX_EMPRESAS_POR_NOME:
+        con.execute("DROP TABLE estab_nome")
+        raise ValueError(
+            f"{n:,} empresas têm essas palavras no nome".replace(",", ".")
+            + ": é muito para uma lista só. Use palavras mais específicas ou escolha um estado."
+        )
+    # Quantas empresas ativas dividem o endereço, contando todas as da base e não só as achadas pelo nome.
+    con.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE estab_mun AS
+        SELECT s.*, CASE WHEN s.cep <> '' AND s.numero NOT IN ('', '0', 'S/N', 'SN', 'S N') THEN v.n END AS no_endereco
+        FROM estab_nome s
+        LEFT JOIN (
+          SELECT e.cep, e.numero, count(*) AS n
+          FROM estab_cidade e JOIN (SELECT DISTINCT cep, numero FROM estab_nome WHERE cep <> '') k
+            ON k.cep = e.cep AND k.numero = e.numero
+          WHERE e.situacao = '02' {"AND e.uf = ?" if uf else ""}
+          GROUP BY 1, 2
+        ) v ON v.cep = s.cep AND v.numero = s.numero
+        """,
+        [uf.upper()] if uf else [],
+    )
+    con.execute("DROP TABLE estab_nome")
+    return n
+
+
 _COLS = (
     "cnpj_basico cnpj matriz_filial nome_fantasia razao_social natureza_juridica porte capital_social cnae_fiscal "
     "cnae_descricao data_inicio_atividade logradouro numero complemento bairro cep email tel1 tel2 mei "
@@ -209,14 +278,18 @@ def _ddds_da_regiao(con: duckdb.DuckDBPyConnection) -> set[str]:
     return {ddd for ddd, n in linhas if n / total >= 0.10}
 
 
-def _da_base(con: duckdb.DuckDBPyConnection, cnaes: list[str], incluir_mei: bool, so_locais: bool = True) -> list[dict]:
+def _da_base(
+    con: duckdb.DuckDBPyConnection, cnaes: list[str], incluir_mei: bool, so_locais: bool = True, extras: tuple[str, ...] = ()
+) -> list[dict]:
     """Estabelecimentos do município cuja atividade principal começa com um dos CNAEs.
 
     Um CNAE vazio pega todas as atividades. Órgãos públicos (natureza 1xxx) ficam fora.
+    `extras`: colunas a mais de `estab_mun` (a busca por nome traz `uf` e `cidade` de cada empresa).
     """
     if not cnaes:
         return []
-    sel = ", ".join(f"e.{c}" for c in _COLS)
+    colunas = [*_COLS, *extras]
+    sel = ", ".join(f"e.{c}" for c in colunas)
     cond = " OR ".join("e.cnae_fiscal LIKE ?" for _ in cnaes)
     extra = "" if incluir_mei else "AND NOT e.mei"
     if so_locais:
@@ -230,7 +303,7 @@ def _da_base(con: duckdb.DuckDBPyConnection, cnaes: list[str], incluir_mei: bool
         "AND coalesce(e.natureza_juridica, '') NOT LIKE '1%' ORDER BY e.cnpj",
         [c + "%" for c in cnaes],
     )
-    return [dict(zip(_COLS, l)) for l in linhas.fetchall()]
+    return [dict(zip(colunas, l)) for l in linhas.fetchall()]
 
 
 def _lugar_da_base(est: dict, cidade: str) -> dict:
@@ -430,20 +503,33 @@ def enriquecer(
     so_ativas: bool = False,
     incluir_mei: bool = False,
     so_locais: bool = True,
+    palavras: list[str] | None = None,
     progresso=None,
 ) -> list[dict]:
     """Leads dos lugares do Maps e, com `cnaes`, também de todo estabelecimento do
-    município com essa atividade na Receita (ativo ou não) que o Maps não trouxe."""
+    município com essa atividade na Receita (ativo ou não) que o Maps não trouxe.
+
+    Com `palavras`, o recorte deixa de ser o município: entram as empresas do estado `uf`
+    (ou do país, com `uf` vazia) que têm uma das palavras no nome, e cada linha leva a
+    cidade e o estado da própria empresa. "Só locais" passa a valer por estado: sede da
+    empresa dentro do recorte e telefone com DDD do estado dela.
+    """
     etapa = progresso or (lambda texto: None)
-    etapa("Carregando as empresas da cidade")
-    carregar_municipio(con, codigo_municipio, uf, so_ativas)
+    amplo = bool(palavras)
+    if amplo:
+        etapa("Procurando as empresas pelo nome")
+        carregar_por_nome(con, palavras, uf, so_ativas)
+    else:
+        etapa("Carregando as empresas da cidade")
+        carregar_municipio(con, codigo_municipio, uf, so_ativas)
     casados = _casar(con, lugares) if lugares else {}
     itens = [(lugar, *casados.get(i, (None, 0.0, "")), "Google Maps") for i, lugar in enumerate(lugares)]
     ja = {est["cnpj"] for est, _, _ in casados.values()}
-    ddds = _ddds_da_regiao(con) if so_locais else set()
-    for est in _da_base(con, cnaes or [], incluir_mei, so_locais):
+    ddds = _ddds_da_regiao(con) if so_locais and not amplo else set()
+    for est in _da_base(con, cnaes or [], incluir_mei, so_locais, ("uf", "cidade") if amplo else ()):
         if est["cnpj"] not in ja:
-            itens.append((_lugar_da_base(est, cidade), est, 1.0, "direto da Receita", "Receita"))
+            local = _titulo_de_cidade(est["cidade"]) if amplo else cidade
+            itens.append((_lugar_da_base(est, local), est, 1.0, "direto da Receita", "Receita"))
 
     etapa("Identificando donos e sócios")
     basicos = sorted({est["cnpj_basico"] for _, est, _, _, _ in itens if est})
@@ -475,9 +561,10 @@ def enriquecer(
                 cands.setdefault(t, {})["dono"] = True
         # Números de enfeite (99999-9999, 12345678) não são de ninguém.
         cands = {t: o for t, o in cands.items() if not suspeito(t)}
-        if ddds:
+        permitidos = DDDS_POR_UF.get((est or {}).get("uf") or "", set()) if amplo and so_locais else ddds
+        if permitidos:
             # Só telefones da região: número de outro DDD costuma ser de sócio ou diretor que mora fora.
-            cands = {t: o for t, o in cands.items() if t[:2] in ddds}
+            cands = {t: o for t, o in cands.items() if t[:2] in permitidos}
         todos.update(cands)
         # Cada telefone vai para o sócio em cujas empresas ele mais aparece; no empate, para o principal.
         divisao: list[dict[str, dict]] = [{} for _ in socios] or [{}]
@@ -502,7 +589,8 @@ def enriquecer(
     solar_pj, solar_grupo, solar_pf = aneel.consultar(
         con,
         sorted({p["est"]["cnpj"] for p in pre if p["est"]}),
-        sorted({c for p in pre if (c := _cpf6(p["dono"], p["est"]))}),
+        # O CPF mascarado só se compara dentro de um município; numa lista de vários, fica de fora.
+        [] if amplo else sorted({c for p in pre if (c := _cpf6(p["dono"], p["est"]))}),
         cidade,
         uf,
     )
@@ -516,10 +604,12 @@ def enriquecer(
         if p["est"] and p["dono"] and _chave_identifica(p["dono"].get("chave") or "")
         and (p["est"]["cnpj"] in solar_pj or p["est"]["cnpj_basico"] in solar_grupo)
     }
-    por_cep = dict(
-        con.execute("SELECT substr(cep, 1, 5), count(*) FROM estab_mun WHERE situacao = '02' AND length(cep) = 8 GROUP BY 1").fetchall()
-    )
-    regioes = aneel.regioes_solares(con, cidade, uf, por_cep)
+    regioes: set[str] = set()
+    if not amplo:  # "região com muita energia solar" é uma medida de bairros de uma cidade
+        por_cep = dict(
+            con.execute("SELECT substr(cep, 1, 5), count(*) FROM estab_mun WHERE situacao = '02' AND length(cep) = 8 GROUP BY 1").fetchall()
+        )
+        regioes = aneel.regioes_solares(con, cidade, uf, por_cep)
     etapa("Pontuando os contatos")
     leads: list[dict] = []
     for p in pre:
@@ -634,7 +724,7 @@ def enriquecer(
                 "endereco": lugar["endereco"],
                 "bairro": lugar["bairro"] or (est or {}).get("bairro") or "",
                 "cidade": lugar["cidade"],
-                "uf": uf.upper(),
+                "uf": ((est or {}).get("uf") or uf).upper(),
                 "cep": lugar["cep"] or (est or {}).get("cep") or "",
                 "site": lugar["site"],
                 "avaliacoes": lugar["avaliacoes"],
