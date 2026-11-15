@@ -162,7 +162,7 @@ async function telaBase(raiz) {
         ajuste({ icone: 'check', tom: 'verde', titulo: 'Com WhatsApp', valor: num(w.com_whatsapp) }),
         ajuste({ icone: 'pessoa', tom: 'verde', titulo: 'Pessoais', valor: num(w.pessoais) }),
         ajuste({ icone: 'predio', tom: 'verde', titulo: 'Comerciais', valor: num(w.comerciais) })]),
-      blocoExportacoes(), blocoAcessos());
+      blocoExportacoes(), blocoChaves(), blocoAcessos());
   }
   carregar();
 }
@@ -182,7 +182,8 @@ function blocoExportacoes() {
 /* ---------- Acessos ao sistema ---------- */
 function blocoAcessos() {
   const zona = h('div', {});
-  const TIPOS = { entrou: ['check', 'verde', 'Entrou'], saiu: ['esquerda', 'cinza', 'Saiu'], 'senha errada': ['alerta', 'laranja', 'Senha errada'], bloqueado: ['alerta', 'vermelho', 'Bloqueado'] };
+  const TIPOS = { entrou: ['check', 'verde', 'Entrou'], saiu: ['esquerda', 'cinza', 'Saiu'], 'senha errada': ['alerta', 'laranja', 'Senha errada'], bloqueado: ['alerta', 'vermelho', 'Bloqueado'],
+    'chave criada': ['check', 'verde', 'Chave de API criada'], 'chave revogada': ['alerta', 'laranja', 'Chave de API revogada'] };
   api('/api/acessos').then((itens) => {
     const ls = (itens || []).slice(0, 30);
     zona.replaceChildren(grupoAjustes('Acessos ao sistema', ls.length
@@ -190,5 +191,150 @@ function blocoAcessos() {
         return ajuste({ icone: ic, tom, titulo: rot, descricao: dataRelativa(a.quando), valor: h('span', { class: 'ip-acesso', text: a.ip || '' }) }); })
       : [ajuste({ icone: 'info', tom: 'cinza', titulo: 'Nenhum acesso registrado ainda' })]));
   }).catch(() => { /* sem registro de acessos neste servidor */ });
+  return zona;
+}
+
+/* ---------- Chaves de API ---------- */
+function blocoChaves() {
+  const zona = h('div', {});
+  const S = { chaves: null, erro: '', mostrarRevogadas: false };
+  const origem = location.origin;
+  const urlApi = origem + '/api/v1';
+
+  function botaoCopiar(texto, rotulo) {
+    const b = h('button', { class: 'btn btn-sec btn-pequeno', type: 'button', 'aria-label': rotulo || 'Copiar' }, 'Copiar');
+    b.addEventListener('click', async () => {
+      const ok = await copiarTexto(texto);
+      avisar(ok ? 'Copiado.' : 'Não foi possível copiar. Selecione o texto e copie.', ok ? undefined : 'erro');
+    });
+    return b;
+  }
+  const bloco = (texto, rotulo) => h('div', { class: 'api-bloco' }, h('pre', { class: 'api-codigo', tabindex: '0', 'aria-label': rotulo, text: texto }), botaoCopiar(texto, 'Copiar ' + rotulo.toLowerCase()));
+
+  function linhaChave(c, revogada) {
+    const meta = [`criada ${dataRelativa(c.criada_em)}`];
+    if (revogada) meta.push(`revogada ${dataRelativa(c.revogada_em)}`);
+    else meta.push(c.ultimo_uso ? `último uso ${dataRelativa(c.ultimo_uso)}` : 'nunca usada');
+    return h('div', { class: 'ajuste chave-linha' },
+      h('div', { class: 'ajuste-tx' },
+        h('div', { class: 'ajuste-t' }, c.nome, ' ', h('span', { class: 'chave-comeco', text: `${c.comeco}…` })),
+        h('div', { class: 'ajuste-d', text: meta.join(' · ') })),
+      revogada ? null : h('button', { class: 'btn btn-texto btn-pequeno', type: 'button', 'aria-label': `Revogar a chave ${c.nome}`, onclick: () => revogar(c) }, 'Revogar'));
+  }
+
+  async function revogar(c) {
+    const ok = await confirmar({ titulo: 'Revogar chave?', texto: `A automação que usa a chave “${c.nome}” para de funcionar na hora.`, ok: 'Revogar', perigo: true });
+    if (!ok) return;
+    try { await api(`/api/chaves/${encodeURIComponent(c.id)}`, { method: 'DELETE' }); avisar('Chave revogada.'); }
+    catch (e) { avisar(e.message, 'erro'); }
+    carregar();
+  }
+
+  function dialogoCriar() {
+    const idT = uid('dlg');
+    const campo = h('input', { type: 'text', id: uid('nome-chave'), maxlength: '60', autocomplete: 'off', spellcheck: 'false', placeholder: 'Ex.: n8n, GHL', 'aria-label': 'Nome da chave', 'data-foco': '' });
+    const erro = h('p', { class: 'erro-inline', role: 'alert' });
+    const corpo = h('div', { class: 'dialogo-corpo' });
+    const acoes = h('div', { class: 'dialogo-acoes' });
+    const titulo = h('h2', { id: idT, text: 'Nova chave de API' });
+    const painel = h('div', { class: 'dialogo dialogo-chave', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': idT, tabindex: '-1' }, titulo, corpo, acoes);
+    const m = abrirModal(painel);
+    m.veu.addEventListener('mousedown', (e) => { if (e.target === m.veu) e.stopImmediatePropagation(); }, true); /* clique fora não pode perder a chave */
+
+    const cancelar = h('button', { class: 'btn btn-sec', type: 'button', onclick: () => m.fechar() }, 'Cancelar');
+    const criar = h('button', { class: 'btn btn-prim', type: 'button' }, 'Criar');
+    function etapaNome() {
+      corpo.replaceChildren(h('p', { text: 'Dê um nome que lembre onde ela será usada.' }), h('div', { class: 'campo' }, h('label', { for: campo.id, text: 'Nome' }), campo), erro);
+      acoes.replaceChildren(cancelar, criar);
+    }
+    async function enviar() {
+      const nome = campo.value.trim();
+      if (!nome) { erro.textContent = 'Escreva um nome para a chave.'; campo.focus(); return; }
+      criar.disabled = true; erro.textContent = '';
+      let r;
+      try { r = await api('/api/chaves', { method: 'POST', corpo: { nome } }); }
+      catch (e) { erro.textContent = e.message; criar.disabled = false; return; }
+      etapaChave(r.chave); /* a chave só existe aqui dentro */
+      r = null;
+      carregar();
+    }
+    function etapaChave(chave) {
+      titulo.textContent = 'Chave criada';
+      const idC = uid('chave');
+      const caixa = h('textarea', { id: idC, class: 'textarea chave-completa', readonly: true, rows: '3', spellcheck: 'false', autocomplete: 'off', 'aria-label': 'Chave de API completa', 'data-foco': '' });
+      caixa.value = chave;
+      const copiar = h('button', { class: 'btn btn-sec', type: 'button' }, 'Copiar');
+      copiar.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(caixa.value); avisar('Chave copiada.'); }
+        catch (e) { caixa.focus(); caixa.select(); avisar('Não foi possível copiar sozinho. O texto está selecionado: copie com Ctrl+C.', 'erro'); }
+      });
+      corpo.replaceChildren(
+        h('p', { class: 'chave-aviso', text: 'Copie agora. Ela não aparece de novo.' }),
+        h('div', { class: 'campo' }, h('label', { for: idC, text: 'Sua chave' }), caixa), copiar);
+      acoes.replaceChildren(h('button', { class: 'btn btn-prim', type: 'button', onclick: () => m.fechar() }, 'Pronto'));
+      setTimeout(() => { caixa.focus(); caixa.select(); }, 60);
+    }
+    criar.addEventListener('click', enviar);
+    campo.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); enviar(); } });
+    etapaNome();
+  }
+
+  function comoUsar() {
+    const det = h('details', { class: 'api-como' }, h('summary', { text: 'Como usar a API' }));
+    const rotas = h('div', { class: 'api-rotas' }, h('p', { class: 'dica', text: 'Carregando rotas…' }));
+    const corpo = h('div', { class: 'api-corpo' },
+      h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'Endereço da API' }), bloco(urlApi, 'Endereço da API')),
+      h('p', {}, 'Envie a chave no cabeçalho ', h('code', { text: 'Authorization: Bearer SUA_CHAVE' }), '.'),
+      h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'Testar a chave' }), bloco(`curl -H "Authorization: Bearer SUA_CHAVE" ${origem}/api/v1/`, 'Exemplo de teste')),
+      h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'Retirar contatos' }),
+        bloco(`curl -X POST "${origem}/api/v1/listas/ID_DA_LISTA/retirar" \\\n  -H "Authorization: Bearer SUA_CHAVE" -H "Content-Type: application/json" \\\n  -d '{"pasta": "Disparo semana 47", "quantidade": 100}'`, 'Exemplo de retirada'),
+        h('p', { class: 'dica', text: 'Retirar entrega os próximos contatos que ainda não estão em nenhuma pasta e já os guarda na pasta indicada; chamar de novo traz os seguintes.' })),
+      h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'Rotas' }), rotas),
+      h('p', { class: 'dica', text: 'Limite: 300 chamadas por minuto por chave. A chave só abre a API: não entra na página e não apaga nada.' }));
+    det.append(corpo);
+    let pedido = false;
+    det.addEventListener('toggle', () => {
+      if (!det.open || pedido) return; pedido = true;
+      api('/api/v1/').then((r) => {
+        const ls = (r && r.rotas) || [];
+        rotas.replaceChildren(...(ls.length ? ls.map((x) => h('div', { class: 'api-rota' },
+          h('span', { class: 'api-metodo', text: x.metodo }), h('code', { class: 'api-caminho', text: String(x.caminho || '').replace(/^\/api\/v1(?=\/)/, '').replace(/\{(id_|pasta_id)\}/g, '{id}') }),
+          h('span', { class: 'api-desc', text: x.descricao || '' }))) : [h('p', { class: 'dica', text: 'Nenhuma rota listada.' })]));
+      }).catch((e) => { pedido = false; rotas.replaceChildren(h('p', { class: 'dica', text: e.message })); });
+    });
+    return det;
+  }
+
+  function desenhar() {
+    let linhas;
+    if (S.erro) linhas = [h('div', { class: 'ajuste' }, h('div', { class: 'ajuste-tx' }, h('div', { class: 'ajuste-d', text: S.erro }), h('button', { class: 'btn btn-sec btn-pequeno', type: 'button', onclick: carregar }, 'Tentar de novo')))];
+    else if (!S.chaves) linhas = [h('div', { class: 'ajuste' }, esqueleto('60%', '18px'))];
+    else {
+      const ativas = S.chaves.filter((c) => !c.revogada_em), rev = S.chaves.filter((c) => c.revogada_em);
+      linhas = ativas.length ? ativas.map((c) => linhaChave(c, false)) : [h('div', { class: 'ajuste' }, h('div', { class: 'ajuste-d', text: 'Nenhuma chave ainda.' }))];
+      if (rev.length) {
+        const b = h('button', { class: 'chave-rev-bt', type: 'button', 'aria-expanded': String(S.mostrarRevogadas), onclick: () => { S.mostrarRevogadas = !S.mostrarRevogadas; desenhar(); } },
+          `${rev.length} ${rev.length === 1 ? 'revogada' : 'revogadas'}`);
+        linhas.push(h('div', { class: 'ajuste' }, b));
+        if (S.mostrarRevogadas) linhas.push(...rev.map((c) => linhaChave(c, true)));
+      }
+    }
+    zona.replaceChildren(h('section', { class: 'ajustes' }, h('h2', { class: 'ajustes-tit', text: 'Chaves de API' }),
+      h('div', { class: 'cartao cartao-ajustes' },
+        h('div', { class: 'ajuste' }, h('p', { class: 'ajuste-d', text: 'Para suas automações (n8n, GHL) lerem listas e retirarem contatos sem usar a senha do sistema.' })),
+        linhas,
+        h('div', { class: 'ajuste' }, h('button', { class: 'btn btn-prim', type: 'button', disabled: !S.chaves, onclick: dialogoCriar }, 'Criar chave')),
+        h('div', { class: 'ajuste ajuste-bloco' }, comoUsar()))));
+  }
+
+  async function carregar() {
+    try { S.chaves = await api('/api/chaves'); S.erro = ''; }
+    catch (e) { S.erro = e.status === 404 ? 'As chaves de API ainda não estão disponíveis neste servidor.' : e.message; }
+    const aberto = zona.querySelector('details.api-como[open]');
+    desenhar();
+    if (aberto) { const d = zona.querySelector('details.api-como'); if (d) d.open = true; }
+  }
+  desenhar();
+  carregar();
   return zona;
 }

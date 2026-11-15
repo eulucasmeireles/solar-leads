@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import aneel, cnpj_db, config, enriquecer, pastas, pipeline, whatsapp
+from .. import aneel, chaves, cnpj_db, config, enriquecer, pastas, pipeline, whatsapp
 from ..telefone import e164, normalizar, so_digitos
 
 AQUI = Path(__file__).parent
@@ -133,6 +133,45 @@ def _ip(request: Request) -> str:
     return encaminhado.split(",")[-1].strip() or (request.client.host if request.client else "?")
 
 
+API_MAX_ERROS, API_POR_MINUTO = 20, 300
+_api_erros: dict[str, list[float]] = {}  # ip -> [chaves erradas seguidas, bloqueado até]
+_api_chamadas: dict[int, list[float]] = {}  # id da chave -> horários das chamadas do último minuto
+
+
+def _conferir_chave(request: Request) -> JSONResponse | None:
+    """None se a requisição traz uma chave de API válida e dentro do limite; senão, a resposta de recusa."""
+    ip, agora = _ip(request), time.time()
+    erros, ate = _api_erros.get(ip, [0, 0.0])
+    if agora < ate:
+        return JSONResponse(
+            {"detail": "Muitas tentativas com chave inválida. Tente de novo mais tarde."},
+            status_code=429, headers={"Retry-After": str(int(ate - agora) + 1)},
+        )
+    cabecalho = request.headers.get("authorization", "")
+    chave = cabecalho[7:].strip() if cabecalho[:7].lower() == "bearer " else request.headers.get("x-api-key", "").strip()
+    registro = chaves.conferir(chave)
+    if not registro:
+        erros += 1
+        _api_erros[ip] = [0, agora + BLOQUEIO_S] if erros >= API_MAX_ERROS else [erros, 0.0]
+        if len(_api_erros) > 5000:
+            _api_erros.clear()
+        return JSONResponse(
+            {"detail": "Chave de API ausente ou inválida. Envie no cabeçalho: Authorization: Bearer <sua chave>."},
+            status_code=401, headers={"WWW-Authenticate": "Bearer"},
+        )
+    _api_erros.pop(ip, None)
+    recentes = [t for t in _api_chamadas.get(registro["id"], []) if agora - t < 60]
+    if len(recentes) >= API_POR_MINUTO:
+        return JSONResponse(
+            {"detail": f"Limite de {API_POR_MINUTO} chamadas por minuto atingido. Espere um pouco."},
+            status_code=429, headers={"Retry-After": str(int(60 - (agora - recentes[0])) + 1)},
+        )
+    recentes.append(agora)
+    _api_chamadas[registro["id"]] = recentes
+    request.state.chave = registro
+    return None
+
+
 @app.middleware("http")
 async def exigir_sessao(request: Request, call_next):
     caminho = request.scope.get("path", "")
@@ -142,6 +181,15 @@ async def exigir_sessao(request: Request, call_next):
         return JSONResponse({"detail": "Endereço inválido."}, status_code=404)
     fonte = caminho.startswith("/static/fonts/") and caminho.endswith(".woff2") and caminho.count("/") == 3
     livre = caminho in ("/login", "/api/login", "/api/sessao") or fonte
+    # A API das automações (/api/v1) aceita uma chave no lugar da sessão. A chave não abre mais nada:
+    # nem a página, nem as rotas internas, nem a criação de outras chaves.
+    if SENHA_HASH and caminho.startswith("/api/v1/") and not _sessao_valida(request.cookies.get(COOKIE)):
+        recusa = _conferir_chave(request)
+        if recusa is not None:
+            return recusa
+        resposta = await call_next(request)
+        resposta.headers["Cache-Control"] = "no-store"
+        return resposta
     if not SENHA_HASH or livre or _sessao_valida(request.cookies.get(COOKIE)):
         resposta = await call_next(request)
         if caminho.startswith("/api/"):
@@ -1217,6 +1265,120 @@ def _copias_diarias() -> None:
 
 
 threading.Thread(target=_copias_diarias, daemon=True).start()
+
+
+# ---------- chaves de API (só com sessão: uma chave não cria nem revoga chaves) ----------
+
+class NovaChave(BaseModel):
+    nome: str
+
+
+@app.get("/api/chaves")
+def listar_chaves() -> list[dict]:
+    return chaves.listar()
+
+
+@app.post("/api/chaves")
+def criar_chave(pedido: NovaChave, request: Request) -> dict:
+    try:
+        registro, chave = chaves.criar(pedido.nome)
+    except chaves.ChaveInvalida as e:
+        raise HTTPException(400, str(e)) from e
+    pastas.registrar_acesso("chave criada", _ip(request))
+    return {**registro, "chave": chave}  # a chave completa só aparece aqui, uma vez
+
+
+@app.delete("/api/chaves/{chave_id}")
+def revogar_chave(chave_id: int, request: Request) -> dict:
+    if not chaves.revogar(chave_id):
+        raise HTTPException(404, "Chave não encontrada ou já revogada.")
+    pastas.registrar_acesso("chave revogada", _ip(request))
+    return {"ok": True}
+
+
+# ---------- API das automações (/api/v1) ----------
+# Mesmas respostas das rotas que a página usa, num endereço estável e que aceita chave de API.
+# Só leitura, criação de lista, criação de pasta e retirada de contatos: nada aqui apaga dados.
+
+class Retirada(BaseModel):
+    pasta: str  # nome da pasta onde os contatos ficam marcados; é criada se não existir
+    quantidade: int = 100
+
+
+_trava_retirada = threading.Lock()
+
+
+def retirar(id_: str, pedido: Retirada, f: Annotated[Filtros, Depends()]) -> dict:
+    """Entrega os próximos contatos da lista que ainda não estão em nenhuma pasta e já os guarda na pasta indicada.
+
+    Chamar de novo traz os seguintes: quem já saiu não volta. Aceita os mesmos filtros de /contatos.
+    """
+    meta = _ler_meta(id_)
+    if meta["status"] != "pronta":
+        raise HTTPException(409, "A lista ainda não está pronta.")
+    arquivo = _parquet(id_)
+    quantidade = max(1, min(1000, pedido.quantidade))
+    with _trava_retirada:  # duas retiradas ao mesmo tempo não podem entregar o mesmo contato
+        nome = " ".join(pedido.pasta.split())
+        achada = next((p for p in pastas.listar() if p["nome"].casefold() == nome.casefold()), None)
+        try:
+            pasta_id = achada["id"] if achada else pastas.criar(nome)
+        except pastas.PastaInvalida as e:
+            raise HTTPException(400, str(e)) from e
+        cte, params = f.consulta(arquivo, "fora")
+        con = duckdb.connect()
+        linhas = _linhas(
+            con.execute(f"{cte} SELECT * EXCLUDE (dono_chave, ordem) FROM r ORDER BY {f.ordem} LIMIT {quantidade}", params)
+        )
+        for l in linhas:
+            l["publico"] = _publico(meta)
+        pastas.adicionar(pasta_id, linhas, id_, _rotulo(meta))
+        cte, params = f.consulta(arquivo, "fora")
+        restantes = con.execute(f"{cte} SELECT count(*) FROM r", params).fetchone()[0]
+    return {
+        "pasta": {"id": pasta_id, "nome": achada["nome"] if achada else nome, "criada_agora": not achada},
+        "retirados": len(linhas),
+        "restantes": restantes,
+        "linhas": linhas,
+    }
+
+
+def inicio_da_api(request: Request) -> dict:
+    """Serve para testar a chave e ver o que a API oferece."""
+    registro = getattr(request.state, "chave", None)
+    return {
+        "ok": True,
+        "sistema": "Solar Leads",
+        "versao": "v1",
+        "chave": registro["nome"] if registro else None,
+        "limite_por_minuto": API_POR_MINUTO,
+        "rotas": [{"metodo": m, "caminho": f"/api/v1{c}", "descricao": d} for m, c, _, d in _ROTAS_V1 if c != "/"],
+    }
+
+
+_ROTAS_V1 = [
+    ("GET", "/", inicio_da_api, "Testa a chave e lista as rotas"),
+    ("GET", "/base", base, "Situação da base: mês da Receita, ANEEL, WhatsApp verificados"),
+    ("GET", "/cidades", cidades, "Busca de município pelo nome (q=)"),
+    ("GET", "/atividades", atividades, "Busca de atividade econômica (q=)"),
+    ("GET", "/campos", campos, "Campos que cada contato traz"),
+    ("GET", "/publico", previa_do_publico, "Quantas empresas têm certas palavras no nome (palavra=, uf=)"),
+    ("GET", "/listas", listar, "Todas as listas"),
+    ("POST", "/listas", criar_lista, "Gera uma lista (cidade + uf, ou palavras); acompanhe o status em /listas/{id}"),
+    ("GET", "/listas/{id_}", uma_lista, "Uma lista: status, etapa e resumo"),
+    ("GET", "/listas/{id_}/filtros", opcoes_de_filtro, "Opções de cada filtro da lista, com contagem"),
+    ("GET", "/listas/{id_}/contatos", contatos, "Contatos da lista, com filtros e paginação (até 500 por página)"),
+    ("GET", "/listas/{id_}/exportar", exportar, "CSV da lista para o GHL, com os mesmos filtros"),
+    ("POST", "/listas/{id_}/retirar", retirar, "Entrega os próximos contatos fora de pastas e já os guarda numa pasta"),
+    ("GET", "/pastas", listar_pastas, "Todas as pastas"),
+    ("POST", "/pastas", criar_pasta, "Cria uma pasta"),
+    ("GET", "/pastas/{pasta_id}", uma_pasta, "Uma pasta"),
+    ("GET", "/pastas/{pasta_id}/contatos", contatos_da_pasta, "Contatos da pasta, com paginação"),
+    ("POST", "/pastas/{pasta_id}/adicionar", adicionar_a_pasta, "Guarda na pasta os N primeiros contatos de uma lista (lista_id=, quantidade=)"),
+    ("GET", "/pastas/{pasta_id}/exportar", exportar_pasta, "CSV da pasta para o GHL"),
+]
+for _metodo, _caminho, _funcao, _descricao in _ROTAS_V1:
+    app.add_api_route(f"/api/v1{_caminho}", _funcao, methods=[_metodo], summary=_descricao)
 
 
 @app.get("/")

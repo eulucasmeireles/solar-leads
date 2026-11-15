@@ -670,3 +670,37 @@ input:focus-visible, select:focus-visible { outline: 0; border-color: var(--acen
 .pf-fato-v { display: flex; align-items: center; justify-content: center; min-width: 76px; max-width: 120px; min-height: 76px; padding: 6px 12px; border-radius: 24px; background: var(--apoio); font-size: 24px; font-weight: 300; letter-spacing: -.02em; text-align: center; }
 .pf-fato-v.txt { font-size: 14px; font-weight: 500; letter-spacing: 0; line-height: 1.25; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .pf-fato-v { min-width: 0; width: 100%; max-width: none; } }
+
+/* ---------- chaves de API ---------- */
+.btn-pequeno { min-height: 34px; padding: 0 14px; font-size: 13.5px; }
+.chave-linha .btn { flex: none; }
+.chave-comeco, .api-caminho, .api-codigo, .chave-completa, .api-como code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.chave-comeco { font-size: 12.5px; font-weight: 400; color: var(--txt3); }
+.chave-rev-bt { font: inherit; font-size: 13.5px; color: var(--txt2); background: transparent; border: 0; padding: 0; cursor: pointer; }
+.chave-rev-bt:hover { color: var(--txt); }
+.cartao-ajustes > .ajuste-bloco { display: block; }
+.api-como > summary { cursor: pointer; font-weight: 500; font-size: 14.5px; list-style: none; }
+.api-como > summary::-webkit-details-marker { display: none; }
+.api-como > summary::after { content: " ›"; color: var(--txt3); }
+.api-como[open] > summary::after { content: " ⌄"; }
+.api-corpo { display: flex; flex-direction: column; gap: 18px; margin-top: 14px; font-size: 14px; }
+.api-corpo p { margin: 0; color: var(--txt2); }
+.api-corpo .campo { gap: 8px; }
+.api-rot { font-size: 13px; color: var(--txt2); font-weight: 500; }
+.api-bloco { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; }
+.api-codigo { margin: 0; width: 100%; box-sizing: border-box; padding: 12px 14px; background: var(--apoio); border-radius: 14px; font-size: 12.5px; line-height: 1.5; color: var(--txt); white-space: pre; overflow-x: auto; }
+.api-como code { font-size: 12.5px; background: var(--apoio); padding: 2px 6px; border-radius: 6px; overflow-wrap: anywhere; }
+.api-rota { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 8px 0; }
+.api-rota + .api-rota { border-top: 1px solid var(--linha); }
+.api-metodo { flex: none; width: 52px; font-size: 12px; font-weight: 600; color: var(--txt2); }
+.api-caminho { font-size: 12.5px; overflow-wrap: anywhere; min-width: 0; flex: 1 1 160px; }
+.api-desc { flex: 1 1 100%; padding-left: 62px; color: var(--txt2); font-size: 13px; }
+.dialogo-chave { text-align: left; }
+.dialogo-chave h2 { text-align: center; }
+.dialogo-corpo { display: flex; flex-direction: column; gap: 12px; }
+.dialogo-corpo .btn { align-self: flex-start; }
+.dialogo-corpo p { margin: 0; }
+.dialogo-chave .erro-inline { min-height: 0; }
+.chave-completa { min-height: 0; font-size: 13px; line-height: 1.5; word-break: break-all; resize: none; }
+.chave-aviso { color: var(--txt); font-weight: 500; }
+[data-demo] .chave-completa { filter: blur(7px); user-select: none; -webkit-user-select: none; }
