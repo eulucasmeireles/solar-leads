@@ -21,11 +21,11 @@ from typing import Annotated
 
 import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import aneel, chaves, cnpj_db, config, enriquecer, pastas, pipeline, whatsapp
+from .. import aneel, chaves, cnpj_db, config, enriquecer, pastas, pipeline, relatorio, whatsapp
 from ..telefone import e164, normalizar, so_digitos
 
 AQUI = Path(__file__).parent
@@ -998,6 +998,84 @@ def exportar(id_: str, f: Annotated[Filtros, Depends()], request: Request) -> St
     )
 
 
+# ---------- PDF ----------
+
+_FAIXAS = {"A": "contatos fortes", "B": "contatos médios"}
+_TIPOS_WHATSAPP = {"pessoal": "WhatsApp pessoal", "business": "WhatsApp comercial"}
+
+
+def _descricao_do_filtro(f: Filtros) -> str:
+    """O filtro em palavras, para a capa do PDF: "Com WhatsApp confirmado · MG · busca “solar”"."""
+    partes = []
+    tipos = [t for t in (f.em.get("tipo_whatsapp") or []) if t in _TIPOS_WHATSAPP]
+    if len(tipos) == 2:
+        partes.append("Com WhatsApp confirmado")
+    elif tipos:
+        partes.append(_TIPOS_WHATSAPP[tipos[0]])
+    if f.em.get("faixa") and len(f.em["faixa"]) == 1 and f.em["faixa"][0] in _FAIXAS:
+        partes.append("Só " + _FAIXAS[f.em["faixa"][0]])
+    for campo in ("situacao", "papel", "uf", "cidade", "bairro", "atividade", "oportunidade", "solar"):
+        valores = f.em.get(campo) or []
+        if valores:
+            partes.append(", ".join(v.title() if campo in ("cidade", "bairro") else v for v in valores[:3]) + (" e outros" if len(valores) > 3 else ""))
+    if f.aptidao_min:
+        partes.append(f"Potencial a partir de {f.aptidao_min}")
+    if f.com_email:
+        partes.append("Com e-mail")
+    if f.pasta == "fora":
+        partes.append("Fora de pastas")
+    if f.busca.strip():
+        partes.append(f"Busca “{f.busca.strip()}”")
+    return "  ·  ".join(partes)
+
+
+def _resposta_pdf(pdf: bytes, nome: str) -> Response:
+    return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{nome}"'})
+
+
+@app.get("/api/listas/{id_}/pdf")
+def pdf_da_lista(id_: str, f: Annotated[Filtros, Depends()], request: Request) -> Response:
+    """Os contatos do filtro num PDF organizado: capa com o resumo e um cartão por contato."""
+    cte, params = f.consulta(_parquet(id_))
+    meta = _ler_meta(id_)
+    con = duckdb.connect()
+    total = con.execute(f"{cte} SELECT count(*) FROM r", params).fetchone()[0]
+    if total > relatorio.MAX_CONTATOS:
+        raise HTTPException(
+            400,
+            f"O PDF vai até {relatorio.MAX_CONTATOS:,} contatos e este filtro tem {total:,}. Use os filtros ou divida em pastas.".replace(",", "."),
+        )
+    if not total:
+        raise HTTPException(400, "Nenhum contato neste filtro.")
+    linhas = _linhas(con.execute(f"{cte} SELECT * EXCLUDE (dono_chave, ordem) FROM r ORDER BY {f.ordem}", params))
+    if meta.get("palavras"):
+        nome, regiao = " · ".join(p.title() for p in meta["palavras"]), meta["uf"] or "Brasil"
+    else:
+        nome, regiao = relatorio.titulo(meta["cidade"]), meta["uf"]
+    pdf = relatorio.gerar_pdf(linhas, nome=nome, regiao=regiao, publico=_publico(meta), filtro=_descricao_do_filtro(f))
+    pastas.registrar_exportacao("lista", id_, f"PDF da lista de {_rotulo(meta)}", len(linhas), _ip(request))
+    return _resposta_pdf(pdf, f"solar-leads-{pipeline.slug(meta['cidade'])[:40]}-{meta['uf'].lower() or 'br'}-{datetime.now():%Y%m%d-%H%M}.pdf")
+
+
+@app.get("/api/pastas/{pasta_id}/pdf")
+def pdf_da_pasta(pasta_id: int, request: Request) -> Response:
+    pasta = pastas.uma(pasta_id)
+    if not pasta:
+        raise HTTPException(404, "Pasta não encontrada.")
+    _, linhas = pastas.contatos(pasta_id, por_pagina=10**9)
+    if not linhas:
+        raise HTTPException(400, "A pasta está vazia.")
+    if len(linhas) > relatorio.MAX_CONTATOS:
+        raise HTTPException(
+            400,
+            f"O PDF vai até {relatorio.MAX_CONTATOS:,} contatos e esta pasta tem {len(linhas):,}. Divida em pastas menores.".replace(",", "."),
+        )
+    publico = "empresa" if all(l.get("publico") == "empresa" for l in linhas) else "dono"
+    pdf = relatorio.gerar_pdf(linhas, nome=pasta["nome"], publico=publico, origem="Pasta de contatos")
+    pastas.registrar_exportacao("pasta", str(pasta_id), f"PDF da pasta {pasta['nome']}", len(linhas), _ip(request))
+    return _resposta_pdf(pdf, f"solar-leads-pasta-{pipeline.slug(pasta['nome'])}-{datetime.now():%Y%m%d-%H%M}.pdf")
+
+
 # ---------- pastas ----------
 
 class NomeDaPasta(BaseModel):
@@ -1369,6 +1447,7 @@ _ROTAS_V1 = [
     ("GET", "/listas/{id_}/filtros", opcoes_de_filtro, "Opções de cada filtro da lista, com contagem"),
     ("GET", "/listas/{id_}/contatos", contatos, "Contatos da lista, com filtros e paginação (até 500 por página)"),
     ("GET", "/listas/{id_}/exportar", exportar, "CSV da lista para o GHL, com os mesmos filtros"),
+    ("GET", "/listas/{id_}/pdf", pdf_da_lista, "PDF organizado da lista, com os mesmos filtros (até 3.000 contatos)"),
     ("POST", "/listas/{id_}/retirar", retirar, "Entrega os próximos contatos fora de pastas e já os guarda numa pasta"),
     ("GET", "/pastas", listar_pastas, "Todas as pastas"),
     ("POST", "/pastas", criar_pasta, "Cria uma pasta"),
@@ -1376,6 +1455,7 @@ _ROTAS_V1 = [
     ("GET", "/pastas/{pasta_id}/contatos", contatos_da_pasta, "Contatos da pasta, com paginação"),
     ("POST", "/pastas/{pasta_id}/adicionar", adicionar_a_pasta, "Guarda na pasta os N primeiros contatos de uma lista (lista_id=, quantidade=)"),
     ("GET", "/pastas/{pasta_id}/exportar", exportar_pasta, "CSV da pasta para o GHL"),
+    ("GET", "/pastas/{pasta_id}/pdf", pdf_da_pasta, "PDF organizado da pasta (até 3.000 contatos)"),
 ]
 for _metodo, _caminho, _funcao, _descricao in _ROTAS_V1:
     app.add_api_route(f"/api/v1{_caminho}", _funcao, methods=[_metodo], summary=_descricao)

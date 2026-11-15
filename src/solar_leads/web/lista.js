@@ -206,7 +206,16 @@ async function montarLista(raiz, meta, abaInicial, qs) {
   ], { classeBotao: 'btn btn-sec btn-redondo', rotulo: 'Mais ações da lista' });
   const btnPasta = h('button', { class: 'btn btn-sec', type: 'button', disabled: true }, icone('pasta', 18), 'Adicionar a uma pasta');
   btnPasta.addEventListener('click', () => abrirAdicionar({}));
-  raiz.append(cabecalhoDaLista(meta, [btnPasta, btnExportar, menu]));
+  /* PDF organizado: capa com o resumo e um cartão por contato, com os filtros da tela */
+  const LIMITE_PDF = 3000;
+  const btnPdf = h('a', { class: 'btn btn-sec', 'aria-disabled': 'true', title: 'Baixar os contatos num PDF organizado' }, icone('baixar', 18), 'Baixar PDF');
+  btnPdf.addEventListener('click', (ev) => {
+    const total = md.S.res ? md.S.res.total : 0;
+    if (btnPdf.getAttribute('aria-disabled') === 'true') { ev.preventDefault(); return; }
+    if (total > LIMITE_PDF) { ev.preventDefault(); avisar(`O PDF vai até ${num(LIMITE_PDF)} contatos e este filtro tem ${num(total)}. Use os filtros ou divida em pastas.`); return; }
+    avisar('Montando o PDF…');
+  });
+  raiz.append(cabecalhoDaLista(meta, [btnPasta, btnPdf, btnExportar, menu]));
   if (meta.aviso) raiz.append(h('div', { class: 'nota nota-laranja', role: 'note' }, icone('info', 18), h('span', { text: meta.aviso })));
 
   /* --- três números --- */
@@ -375,6 +384,8 @@ async function montarLista(raiz, meta, abaInicial, qs) {
       btnExportar.removeAttribute('aria-disabled');
       btnExportar.href = `/api/listas/${idUrl}/exportar?${queryDosFiltros(L.f)}`;
     }
+    if (total) { btnPdf.href = `/api/listas/${idUrl}/pdf?${queryDosFiltros(L.f, { ordem: L.ordem })}`; btnPdf.removeAttribute('aria-disabled'); }
+    else { btnPdf.removeAttribute('href'); btnPdf.setAttribute('aria-disabled', 'true'); }
     btnPasta.disabled = !total;
     btnVer.textContent = total == null ? 'Ver contatos' : total === 0 ? 'Nenhum contato' : `Ver ${num(total)} ${total === 1 ? 'contato' : 'contatos'}`;
   }

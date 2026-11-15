@@ -329,11 +329,18 @@ async function telaPasta(raiz, id, subaba, qs) {
   const titulo = h('h1', { text: pasta.nome });
   const apoio = h('p', { class: 'apoio' });
   const btnExp = h('a', { class: 'btn btn-prim' }, icone('baixar', 18), 'Exportar pasta');
+  const btnPdf = h('a', { class: 'btn btn-sec', title: 'Baixar os contatos da pasta num PDF organizado' }, icone('baixar', 18), 'Baixar PDF');
+  btnPdf.addEventListener('click', (ev) => {
+    if (btnPdf.getAttribute('aria-disabled') === 'true') { ev.preventDefault(); return; }
+    if (pasta.contatos > 3000) { ev.preventDefault(); avisar(`O PDF vai até 3.000 contatos e esta pasta tem ${num(pasta.contatos)}. Divida em pastas menores.`); return; }
+    avisar('Montando o PDF…');
+  });
   const faixa = h('div', { class: 'zona-faixa' });
   function desenharCab() {
     apoio.textContent = [`${num(pasta.contatos)} ${pasta.contatos === 1 ? 'contato' : 'contatos'}`, (pasta.cidades || []).join(' · '), `criada ${dataRelativa(pasta.criada_em)}`, textoExportacoes(pasta)].filter(Boolean).join(' · ');
     titulo.textContent = pasta.nome; document.title = `${pasta.nome} · Solar Leads`;
     if (pasta.contatos) { btnExp.href = `/api/pastas/${idUrl}/exportar`; btnExp.removeAttribute('aria-disabled'); } else { btnExp.removeAttribute('href'); btnExp.setAttribute('aria-disabled', 'true'); }
+    if (pasta.contatos) { btnPdf.href = `/api/pastas/${idUrl}/pdf`; btnPdf.removeAttribute('aria-disabled'); } else { btnPdf.removeAttribute('href'); btnPdf.setAttribute('aria-disabled', 'true'); }
   }
   desenharCab();
   const menu = criarMenu(icone('pontos', 20), [
@@ -343,7 +350,7 @@ async function telaPasta(raiz, id, subaba, qs) {
   const btnReg = h('button', { class: 'btn btn-sec', type: 'button', onclick: () => folhaRegistrarResultados({ pastaId: id, aoConcluir: recarregarTudo }) }, icone('check', 18), 'Registrar resultados');
   raiz.append(h('header', { class: 'lista-cab' },
     h('a', { class: 'link-volta', href: '#/pastas' }, icone('esquerda', 16), 'Pastas'),
-    h('div', { class: 'lista-cab-linha' }, h('div', { class: 'lista-titulo' }, titulo, apoio), h('div', { class: 'pag-acoes' }, btnReg, btnExp, menu))), faixa);
+    h('div', { class: 'lista-cab-linha' }, h('div', { class: 'lista-titulo' }, titulo, apoio), h('div', { class: 'pag-acoes' }, btnReg, btnPdf, btnExp, menu))), faixa);
 
   function desenharFaixa() {
     if (!R) { faixa.replaceChildren(); return; }

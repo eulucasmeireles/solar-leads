@@ -30,6 +30,7 @@ Responde o nome da chave e a relação de rotas.
 | GET | `/listas/{id}/filtros` | Opções de cada filtro, com contagem |
 | GET | `/listas/{id}/contatos` | Contatos, com filtros e paginação |
 | GET | `/listas/{id}/exportar` | CSV para o GHL, com os mesmos filtros |
+| GET | `/listas/{id}/pdf` | PDF organizado (capa com resumo e um cartão por contato), com os mesmos filtros; até 3.000 contatos |
 | POST | `/listas/{id}/retirar` | Entrega os próximos contatos e já os guarda numa pasta |
 | GET | `/pastas` | Todas as pastas |
 | POST | `/pastas` | Cria uma pasta: `{"nome": "..."}` |
@@ -37,6 +38,7 @@ Responde o nome da chave e a relação de rotas.
 | GET | `/pastas/{id}/contatos` | Contatos da pasta |
 | POST | `/pastas/{id}/adicionar?lista_id=...&quantidade=100` | Guarda na pasta os N primeiros contatos de uma lista |
 | GET | `/pastas/{id}/exportar` | CSV da pasta para o GHL |
+| GET | `/pastas/{id}/pdf` | PDF organizado da pasta; até 3.000 contatos |
 
 ## Retirar contatos (o caminho mais usado)
 
