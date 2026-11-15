@@ -11,7 +11,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from . import aneel, cnpj_db, config, enriquecer, gmaps, pipeline, whatsapp
+from . import aneel, backup, cnpj_db, config, enriquecer, gmaps, pipeline, whatsapp
 
 app = typer.Typer(no_args_is_help=True, help="Listas de leads de energia solar por região.")
 base_app = typer.Typer(no_args_is_help=True, help="Base de CNPJ da Receita.")
@@ -20,6 +20,8 @@ app.add_typer(aneel_app, name="aneel")
 wa_app = typer.Typer(no_args_is_help=True, help="Validação de WhatsApp pelo Evolution GO.")
 app.add_typer(base_app, name="base")
 app.add_typer(wa_app, name="whatsapp")
+backup_app = typer.Typer(no_args_is_help=True, help="Cópia de segurança criptografada dos dados.")
+app.add_typer(backup_app, name="backup")
 
 @base_app.command("cidades")
 def base_cidades() -> None:
@@ -240,6 +242,56 @@ def senha() -> None:
     env.write_text("\n".join(linhas) + "\n")
     env.chmod(0o600)
     typer.echo("Senha trocada. Reinicie o serviço: systemctl --user restart solar-leads-web")
+
+
+@backup_app.command("agora")
+def backup_agora(
+    sem_enviar: Annotated[bool, typer.Option(help="Só cria o arquivo no servidor, sem mandar para o repositório privado")] = False,
+) -> None:
+    """Cria a cópia criptografada e manda para o repositório privado."""
+    arquivo, resumo = backup.criar()
+    typer.echo(f"Cópia criada: {arquivo.name} ({arquivo.stat().st_size / 1024:.0f} KB)")
+    typer.echo(
+        f"  {resumo['pastas']} pastas, {resumo['contatos_em_pastas']} contatos guardados, "
+        f"{resumo['whatsapp_verificados'] or 0} WhatsApp verificados, {resumo['listas']} listas"
+    )
+    if sem_enviar:
+        return
+    if not backup.conectado():
+        raise typer.Exit("Envio não configurado: rode `leads backup conectar <endereço do repositório>`.")
+    typer.echo(f"Enviada. Cópias no repositório: {backup.enviar(arquivo)}")
+
+
+@backup_app.command("conectar")
+def backup_conectar(url: Annotated[str, typer.Argument(help="Endereço do repositório git privado que recebe as cópias")]) -> None:
+    """Liga o envio a um repositório privado (só precisa uma vez)."""
+    import subprocess
+
+    def do_projeto(campo: str) -> str:
+        return subprocess.run(["git", "config", campo], cwd=config.RAIZ, capture_output=True, text=True).stdout.strip()
+
+    backup.conectar(url, do_projeto("user.name"), do_projeto("user.email"))
+    typer.echo(f"Envio ligado a {url}. A chave fica em {backup.chave()}: guarde uma cópia dela fora do servidor.")
+
+
+@backup_app.command("restaurar")
+def backup_restaurar(
+    arquivo: Annotated[Path, typer.Argument(help="Arquivo .tar.gz.gpg da cópia")],
+    destino: Annotated[Path, typer.Argument(help="Pasta nova onde os arquivos serão abertos")],
+) -> None:
+    """Abre uma cópia numa pasta nova, sem tocar nos dados em uso."""
+    resumo = backup.restaurar(arquivo, destino)
+    typer.echo(f"Cópia de {resumo['criado_em']} aberta em {destino}:")
+    typer.echo(
+        f"  {resumo['pastas']} pastas, {resumo['contatos_em_pastas']} contatos guardados, "
+        f"{resumo['whatsapp_verificados'] or 0} WhatsApp verificados, {resumo['listas']} listas"
+    )
+
+
+@backup_app.command("repor-whatsapp")
+def backup_repor_whatsapp(pasta: Annotated[Path, typer.Argument(help="Pasta de uma cópia restaurada")]) -> None:
+    """Devolve à base os WhatsApp verificados de uma cópia restaurada (não apaga os que já existem)."""
+    typer.echo(f"Números repostos: {backup.repor_whatsapp(pasta)}")
 
 
 @app.command()

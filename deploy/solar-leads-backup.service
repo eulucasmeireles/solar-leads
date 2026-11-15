@@ -1,0 +1,7 @@
+[Unit]
+Description=Solar Leads - copia de seguranca criptografada para o repositorio privado
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/projetos/solar-leads
+ExecStart=/home/ubuntu/projetos/solar-leads/.venv/bin/leads backup agora

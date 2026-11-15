@@ -7,6 +7,7 @@ dos dados dele naquele momento; a identidade do contato é o telefone.
 
 from __future__ import annotations
 
+import os
 import json
 import sqlite3
 from contextlib import closing
@@ -47,6 +48,9 @@ def _con() -> sqlite3.Connection:
           id INTEGER PRIMARY KEY AUTOINCREMENT, quando TEXT NOT NULL, tipo TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS nao_contatar (
           telefone TEXT PRIMARY KEY, motivo TEXT NOT NULL DEFAULT '', criado_em TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS chaves_api (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, comeco TEXT NOT NULL, hash TEXT NOT NULL UNIQUE,
+          criada_em TEXT NOT NULL, ultimo_uso TEXT NOT NULL DEFAULT '', revogada_em TEXT NOT NULL DEFAULT '');
         """
     )
     try:  # coluna acrescentada depois da primeira versão
@@ -207,6 +211,20 @@ def bloqueados_recentes(limite: int = 20) -> tuple[int, list[dict]]:
     return total, [dict(i) for i in itens]
 
 
+def copiar_para(arquivo) -> None:
+    """Cópia íntegra do arquivo das pastas, mesmo com o sistema em uso."""
+    with closing(_con()) as origem, closing(sqlite3.connect(arquivo)) as copia:
+        origem.backup(copia)
+    os.chmod(arquivo, 0o600)
+
+
+def totais() -> dict:
+    """Quanto há guardado, para o resumo da cópia de segurança."""
+    with closing(_con()) as con:
+        n_pastas, n_contatos = con.execute("SELECT (SELECT count(*) FROM pastas), (SELECT count(*) FROM pasta_contatos)").fetchone()
+    return {"pastas": n_pastas, "contatos_em_pastas": n_contatos}
+
+
 def copia_de_seguranca(pasta_destino, manter: int = 14) -> str:
     """Copia o arquivo das pastas (único dado que não se refaz) e guarda as últimas `manter` cópias."""
     from pathlib import Path
@@ -214,9 +232,7 @@ def copia_de_seguranca(pasta_destino, manter: int = 14) -> str:
     destino = Path(pasta_destino)
     destino.mkdir(parents=True, exist_ok=True)
     arquivo = destino / f"pastas-{datetime.now():%Y%m%d}.sqlite"
-    with closing(_con()) as origem, closing(sqlite3.connect(arquivo)) as copia:
-        origem.backup(copia)
-    arquivo.chmod(0o600)
+    copiar_para(arquivo)
     for velho in sorted(destino.glob("pastas-*.sqlite"))[:-manter]:
         velho.unlink()
     return str(arquivo)
