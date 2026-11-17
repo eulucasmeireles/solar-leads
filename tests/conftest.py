@@ -20,6 +20,9 @@ os.environ["LEADS_SAIDA"] = str(_TMP / "saida")
 os.environ["LEADS_SENHA_HASH"] = _hash
 os.environ["LEADS_SEGREDO"] = secrets.token_hex(32)
 os.environ.pop("LEADS_SEM_SENHA", None)
+# Chaves de serviços externos ficam vazias: o `.env` de verdade não as preenche e nenhum teste fala com serviço real.
+for _chave in ("ANTHROPIC_API_KEY", "APIFY_TOKEN", "CHECKLEAKED_KEY", "CHECKNUMBER_KEY"):
+    os.environ[_chave] = ""
 
 import pytest  # noqa: E402
 

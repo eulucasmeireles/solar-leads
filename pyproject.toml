@@ -1,7 +1,7 @@
 [project]
 name = "solar-leads"
 version = "0.1.0"
-description = "Prepara listas de leads (donos de estabelecimentos) por região para disparo via GHL"
+description = "Garimpo: listas de leads (donos de empresas) por cidade, para qualquer nicho, com IA e disparo via GHL"
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.1",
@@ -13,6 +13,7 @@ dependencies = [
     "fastapi>=0.162.7",
     "uvicorn>=0.54.0",
     "reportlab>=4.2",
+    "anthropic==2.4.0",
 ]
 
 [project.scripts]

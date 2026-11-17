@@ -1,5 +1,5 @@
 'use strict';
-/* Solar Leads - pastas: telas, folhas de nome e de adicionar contatos */
+/* Garimpo - pastas: telas, folhas de nome e de adicionar contatos */
 
 /* ---------- folha: nome da pasta (criar e renomear) ---------- */
 function folhaNomePasta({ titulo, nome, rotulo, aoSalvar }) {
@@ -270,7 +270,7 @@ function renomearPasta(p, aposSalvar) {
 }
 
 function telaPastas(raiz) {
-  document.title = 'Pastas · Solar Leads';
+  document.title = 'Pastas · Garimpo';
   const grade = h('div', { class: 'grade-listas' }, esqueletoCartoes(3));
   const zonaGeral = h('div', {});
   const busca = h('input', { type: 'search', placeholder: 'Buscar pasta…', autocomplete: 'off', 'aria-label': 'Buscar pasta' });
@@ -308,7 +308,7 @@ function telaPastas(raiz) {
 
 /* ---------- Uma pasta ---------- */
 async function telaPasta(raiz, id, subaba, qs) {
-  document.title = 'Pasta · Solar Leads';
+  document.title = 'Pasta · Garimpo';
   const rota = app.rota;
   const idUrl = encodeURIComponent(id);
   raiz.append(h('div', { class: 'lista-cab', 'aria-busy': 'true' }, esqueleto('260px', '38px'), esqueleto('320px', '16px', 'mt')));
@@ -338,7 +338,7 @@ async function telaPasta(raiz, id, subaba, qs) {
   const faixa = h('div', { class: 'zona-faixa' });
   function desenharCab() {
     apoio.textContent = [`${num(pasta.contatos)} ${pasta.contatos === 1 ? 'contato' : 'contatos'}`, (pasta.cidades || []).join(' · '), `criada ${dataRelativa(pasta.criada_em)}`, textoExportacoes(pasta)].filter(Boolean).join(' · ');
-    titulo.textContent = pasta.nome; document.title = `${pasta.nome} · Solar Leads`;
+    titulo.textContent = pasta.nome; document.title = `${pasta.nome} · Garimpo`;
     if (pasta.contatos) { btnExp.href = `/api/pastas/${idUrl}/exportar`; btnExp.removeAttribute('aria-disabled'); } else { btnExp.removeAttribute('href'); btnExp.setAttribute('aria-disabled', 'true'); }
     if (pasta.contatos) { btnPdf.href = `/api/pastas/${idUrl}/pdf`; btnPdf.removeAttribute('aria-disabled'); } else { btnPdf.removeAttribute('href'); btnPdf.setAttribute('aria-disabled', 'true'); }
   }

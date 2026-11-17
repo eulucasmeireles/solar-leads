@@ -1,5 +1,5 @@
 'use strict';
-/* Solar Leads - telas WhatsApp e Base de dados (cartões no estilo Ajustes) */
+/* Garimpo - telas WhatsApp e Base de dados (cartões no estilo Ajustes) */
 
 function grupoAjustes(titulo, linhas, rodape) {
   return h('section', { class: 'ajustes' }, titulo ? h('h2', { class: 'ajustes-tit', text: titulo }) : null,
@@ -7,135 +7,154 @@ function grupoAjustes(titulo, linhas, rodape) {
 }
 
 /* ---------- WhatsApp ---------- */
+/* números consultados pela CheckLeaked: cada consulta gasta 1 do pacote, tenha WhatsApp ou não */
+const QUANTIDADES_VERIFICAR = [{ valor: '200', rotulo: '200' }, { valor: '500', rotulo: '500' }, { valor: '1000', rotulo: '1.000' }, { valor: '5000', rotulo: 'Todos' }];
+const DICA_VERIFICAR = 'Cada número consultado gasta 1 consulta do pacote, tenha WhatsApp ou não. Quem já foi verificado nos últimos 30 dias não gasta de novo.';
+
+function textoSaldo(sv) {
+  if (!sv || !sv.configurado) return 'Falta a chave da CheckLeaked no servidor.';
+  if (!sv.saldo) return 'Saldo indisponível agora.';
+  return `${num(sv.saldo.restam)} consultas restantes${sv.saldo.vence ? ` · válidas até ${dataBR(sv.saldo.vence)}` : ''}`;
+}
+
+/* folha para escolher quantos contatos verificar, com a conta do saldo antes de começar */
+function dialogoVerificar(meta, aoIniciar) {
+  const idT = uid('dlg');
+  let quantidade = '500', pedido = 0;
+  const conta = h('p', { class: 'verif-conta', 'aria-live': 'polite' }, esqueleto('80%', '14px'));
+  const erro = h('p', { class: 'erro-inline', role: 'alert' });
+  const iniciar = h('button', { class: 'btn btn-prim', type: 'button', disabled: true }, 'Verificar');
+  const cancelar = h('button', { class: 'btn btn-sec', type: 'button', onclick: () => m.fechar() }, 'Cancelar');
+  async function estimar() {
+    const meu = ++pedido;
+    iniciar.disabled = true; conta.replaceChildren(esqueleto('80%', '14px'));
+    try {
+      const e = await api(`/api/listas/${encodeURIComponent(meta.id)}/whatsapp?quantidade=${quantidade}`);
+      if (meu !== pedido) return;
+      const sv = e.servico || {}, restam = sv.saldo ? sv.saldo.restam : null;
+      if (!e.numeros) { conta.textContent = 'Todos os contatos desta lista já têm o WhatsApp verificado.'; return; }
+      const partes = [`${num(e.numeros)} ${e.numeros === 1 ? 'contato' : 'contatos'} na fila`];
+      if (e.ja_verificados) partes.push(`${num(e.ja_verificados)} já verificados, sem custo`);
+      partes.push(`${num(e.consultas)} ${e.consultas === 1 ? 'consulta' : 'consultas'} do saldo`);
+      conta.replaceChildren(h('strong', { text: partes.join(' · ') }), h('br'),
+        h('span', { text: !sv.configurado ? 'Falta a chave da CheckLeaked no servidor.' : restam == null ? 'Não deu para ler o saldo agora.' : `Saldo: ${num(restam)} consultas.${restam < e.consultas ? ' Não cobre tudo: a verificação para quando o saldo acabar.' : ''}` }));
+      iniciar.disabled = !sv.configurado || (restam != null && restam === 0 && e.consultas > 0);
+      iniciar.textContent = e.consultas ? `Verificar ${num(e.numeros)}` : 'Atualizar a lista';
+    } catch (err) { if (meu === pedido) conta.textContent = err.message; }
+  }
+  const seg = segmentado({ opcoes: QUANTIDADES_VERIFICAR, valor: quantidade, rotulo: 'Quantos contatos verificar', papel: 'radio', aoMudar: (v) => { quantidade = v; estimar(); } });
+  iniciar.addEventListener('click', async () => {
+    iniciar.disabled = true; cancelar.disabled = true; erro.textContent = '';
+    iniciar.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Começando…');
+    try {
+      await api('/api/whatsapp/verificacao', { method: 'POST', corpo: { lista_id: meta.id, quantidade: Number(quantidade) } });
+      m.fechar(); avisar('Verificação iniciada.');
+      if (aoIniciar) aoIniciar();
+    } catch (e) { erro.textContent = e.message; cancelar.disabled = false; iniciar.disabled = false; iniciar.replaceChildren('Verificar'); }
+  });
+  const painel = h('div', { class: 'dialogo dialogo-largo', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': idT, tabindex: '-1' },
+    h('h2', { id: idT, text: 'Verificar WhatsApp' }),
+    h('p', { text: `Os próximos contatos da ${rotuloLista(meta)}, na ordem da lista, sem WhatsApp verificado ainda.` }),
+    seg.el, conta, h('p', { class: 'dica', text: DICA_VERIFICAR }), erro,
+    h('div', { class: 'dialogo-acoes' }, cancelar, iniciar));
+  const m = abrirModal(painel);
+  estimar();
+}
+
 async function telaWhatsapp(raiz) {
-  document.title = 'WhatsApp · Solar Leads';
+  document.title = 'WhatsApp · Garimpo';
   const rota = app.rota;
-  const S = { w: null, qr: null, gerandoQr: false, erroQr: '', listas: [], timer: null, timerQr: null, vivo: true };
+  const S = { w: null, listas: [], timer: null, vivo: true, rodava: false };
   const zonaEstado = h('div', {}, h('div', { class: 'cartao' }, h('div', { class: 'sk-pilha' }, esqueleto('40%', '22px'), esqueleto('70%', '14px'), esqueleto('100%', '56px'))));
-  const zonaConexao = h('div', { hidden: true });
   const zonaVerif = h('div', {});
   const live = h('div', { class: 'so-leitor', 'aria-live': 'polite' });
-  aoSair(() => { S.vivo = false; clearTimeout(S.timer); clearInterval(S.timerQr); });
-
-  const aviso = h('div', { class: 'nota nota-laranja', role: 'note' }, icone('alerta', 20),
-    h('div', {}, h('strong', { text: 'Use um chip que você aceite perder.' }), h('p', { text: 'Consultas em massa podem levar o WhatsApp a bloquear o número. Nunca conecte o número da API oficial.' })));
+  aoSair(() => { S.vivo = false; clearTimeout(S.timer); });
 
   function desenharEstado() {
-    const w = S.w, on = Boolean(w && w.disponivel), t = (w && w.totais) || {};
+    const w = S.w, sv = (w && w.servico) || {}, t = (w && w.totais) || {};
+    const ok = Boolean(sv.configurado && sv.saldo && sv.saldo.restam > 0);
     const dado = (k, r) => h('div', { class: 'mini-num' }, h('div', { class: 'mini-num-v', text: t[k] == null ? '—' : num(t[k]) }), h('div', { class: 'mini-num-r', text: r }));
     zonaEstado.replaceChildren(h('section', { class: 'cartao' },
-      ajuste({ icone: 'whatsapp', tom: on ? 'verde' : 'cinza', titulo: on ? 'Conectado' : 'Não conectado',
-        descricao: on ? (w.conta ? `Conta ${w.conta}` : 'Pronto para verificar números') : (w && w.motivo) || 'Nenhum WhatsApp conectado.',
-        valor: h('span', { class: `status-ponto ${on ? 'on' : ''}`, 'aria-hidden': 'true' }) }),
+      ajuste({ icone: 'whatsapp', tom: ok ? 'verde' : 'cinza', titulo: 'Verificação pela CheckLeaked', descricao: textoSaldo(sv),
+        valor: h('span', { class: `status-ponto ${ok ? 'on' : ''}`, 'aria-hidden': 'true' }) }),
       h('div', { class: 'mini-nums' }, dado('verificados', 'verificados'), dado('com_whatsapp', 'com WhatsApp'), dado('pessoais', 'pessoais'), dado('comerciais', 'comerciais'))));
   }
 
-  function desenharConexao() {
-    const on = Boolean(S.w && S.w.disponivel);
-    zonaConexao.hidden = on;
-    if (on) { clearInterval(S.timerQr); S.qr = null; zonaConexao.replaceChildren(); return; }
-    const corpo = [h('div', {}, h('h2', { text: 'Conectar o WhatsApp' }), h('p', { class: 'apoio', text: 'Leia o código com o celular do chip que será usado nas consultas.' }))];
-    if (S.qr) {
-      corpo.push(h('div', { class: 'qr-area' },
-        h('img', { class: 'qr', src: S.qr, alt: 'QR code para conectar o WhatsApp', width: 232, height: 232 }),
-        h('ol', { class: 'passos' },
-          h('li', {}, 'Abra o WhatsApp no celular.'),
-          h('li', {}, 'Vá em ', h('strong', { text: 'WhatsApp > Aparelhos conectados > Conectar um aparelho' }), '.'),
-          h('li', {}, 'Aponte a câmera para este código.'),
-          h('li', { class: 'mudo', text: 'O código se renova a cada 20 segundos. Avisamos aqui quando conectar.' }))));
-    } else {
-      corpo.push(h('div', {}, h('button', { class: 'btn btn-prim', type: 'button', disabled: S.gerandoQr, onclick: gerarQr }, S.gerandoQr ? h('i', { class: 'giro', 'aria-hidden': 'true' }) : icone('sparkle', 18), S.gerandoQr ? 'Gerando…' : 'Gerar QR code')));
-      if (S.erroQr) corpo.push(h('p', { class: 'erro-inline', role: 'alert', text: S.erroQr }));
-    }
-    zonaConexao.replaceChildren(h('section', { class: 'cartao cartao-qr' }, corpo));
-  }
-
-  async function gerarQr() {
-    S.gerandoQr = true; S.erroQr = ''; desenharConexao();
-    try {
-      const r = await api('/api/whatsapp/qr', { method: 'POST' });
-      if (!S.vivo) return;
-      S.qr = r.qr; S.gerandoQr = false; desenharConexao(); agendar(true);
-      clearInterval(S.timerQr);
-      S.timerQr = setInterval(async () => {
-        if (S.w && S.w.disponivel) { clearInterval(S.timerQr); return; }
-        try { const n = await api('/api/whatsapp/qr', { method: 'POST' }); if (S.vivo) { S.qr = n.qr; desenharConexao(); } } catch (e) { if (e.status === 409) atualizar(); }
-      }, 20000);
-    } catch (e) {
-      S.gerandoQr = false;
-      if (e.status === 409) { await atualizar(); return; }
-      S.erroQr = e.message; desenharConexao();
-    }
-  }
-
   function desenharVerificacao() {
-    const w = S.w, v = (w && w.verificacao) || {}, on = Boolean(w && w.disponivel);
-    const ritmo = 'Ritmo lento de propósito, para proteger o chip: cerca de 360 números por hora, das 8h às 20h, até 3.000 por dia.';
+    const v = (S.w && S.w.verificacao) || {}, sv = (S.w && S.w.servico) || {};
     if (v.rodando) {
       const lista = S.listas.find((m) => m.id === v.lista_id);
-      const quanto = Math.min(100, (v.feitos_hoje || 0) / 3000 * 100);
+      const quanto = v.total ? Math.min(100, v.feitos / v.total * 100) : 0;
       zonaVerif.replaceChildren(h('section', { class: 'cartao' },
         ajuste({ icone: 'sparkle', tom: 'laranja', titulo: 'Verificando números', descricao: lista ? `${rotuloLista(lista, true)} · ${regiaoDaLista(lista)}` : 'Em andamento', valor: selo('Rodando', 'laranja', { ponto: true }) }),
         h('div', { class: 'verif-roda' },
-          h('div', { class: 'mini-nums' },
-            h('div', { class: 'mini-num' }, h('div', { class: 'mini-num-v', text: num(v.feitos_hoje) }), h('div', { class: 'mini-num-r', text: 'feitos hoje' })),
-            h('div', { class: 'mini-num' }, h('div', { class: 'mini-num-v', text: v.restantes == null ? '—' : num(v.restantes) }), h('div', { class: 'mini-num-r', text: 'restantes' }))),
-          progresso(quanto, 'Verificações feitas hoje'),
-          h('p', { class: 'apoio-peq', text: `${num(v.feitos_hoje)} de 3.000 permitidos hoje` }),
+          progresso(quanto, 'Números verificados'),
+          h('p', { class: 'apoio-peq', text: `${num(v.feitos)} de ${num(v.total)} números` }),
           v.mensagem ? h('p', { class: 'verif-msg', text: v.mensagem }) : null,
           h('div', {}, h('button', { class: 'btn btn-perigo', type: 'button', onclick: parar }, icone('parar', 18), 'Parar')),
-          h('p', { class: 'dica', text: ritmo }))));
+          h('p', { class: 'dica', text: 'Cerca de 5 minutos para cada 500 números. Ao terminar, a lista é atualizada sozinha.' }))));
       return;
     }
     const prontas = S.listas.filter((m) => m.status === 'pronta');
-    const sel = h('select', { id: 'sel-lista', disabled: !on || !prontas.length }, prontas.map((m) => h('option', { value: m.id, text: `${cidadeUF(m)} · ${num(m.resumo ? m.resumo.contatos_para_disparo : 0)} contatos` })));
-    const botao = h('button', { class: 'btn btn-prim', type: 'button', disabled: !on || !prontas.length, onclick: () => iniciar(sel.value, botao) }, 'Iniciar verificação lenta');
-    const motivo = !on ? 'Conecte um WhatsApp para poder verificar.' : !prontas.length ? 'Gere uma lista primeiro.' : '';
+    const sel = h('select', { id: 'sel-lista', disabled: !prontas.length }, prontas.map((m) => h('option', { value: m.id, text: `${cidadeUF(m)} · ${num(m.resumo ? m.resumo.contatos_para_disparo : 0)} contatos` })));
+    if (v.lista_id && prontas.some((m) => m.id === v.lista_id)) sel.value = v.lista_id;
+    const botao = h('button', { class: 'btn btn-prim', type: 'button', disabled: !prontas.length || !sv.configurado,
+      onclick: () => { const m = prontas.find((x) => x.id === sel.value); if (m) dialogoVerificar(m, atualizar); } }, 'Escolher quantos verificar');
+    const motivo = !sv.configurado ? 'Falta a chave da CheckLeaked no servidor.' : !prontas.length ? 'Gere uma lista primeiro.' : '';
     zonaVerif.replaceChildren(h('section', { class: 'cartao' },
-      ajuste({ icone: 'sparkle', tom: 'azul', titulo: 'Verificar números', descricao: 'Descobre quais números têm WhatsApp e se são pessoais ou comerciais.' }),
+      ajuste({ icone: 'sparkle', tom: 'azul', titulo: 'Verificar números', descricao: 'Descobre quais números têm WhatsApp e se a conta é pessoal ou comercial, sem usar nenhum número seu.' }),
       v.mensagem ? h('p', { class: 'verif-msg', text: v.mensagem }) : null,
       h('div', { class: 'campo' }, h('label', { for: 'sel-lista', text: 'Lista para verificar' }), sel),
       h('div', { class: 'linha-botoes' }, botao, motivo ? h('span', { class: 'dica', text: motivo }) : null),
-      h('p', { class: 'dica' }, ritmo)));
+      h('p', { class: 'dica', text: DICA_VERIFICAR })));
   }
 
-  async function iniciar(id, botao) {
-    botao.disabled = true;
-    try { await api('/api/whatsapp/verificacao', { method: 'POST', corpo: { lista_id: id } }); avisar('Verificação iniciada.'); await atualizar(); }
-    catch (e) { avisar(e.message, 'erro'); botao.disabled = false; }
-  }
   async function parar() {
-    try { await api('/api/whatsapp/verificacao', { method: 'DELETE' }); avisar('Verificação parada.'); await atualizar(); } catch (e) { avisar(e.message, 'erro'); }
+    try { await api('/api/whatsapp/verificacao', { method: 'DELETE' }); avisar('Parando ao fim desta rodada.'); await atualizar(); } catch (e) { avisar(e.message, 'erro'); }
   }
 
   async function atualizar() {
     try {
-      const antes = S.w && S.w.disponivel;
       S.w = await api('/api/whatsapp');
       if (!S.vivo) return;
-      if (S.w.disponivel && !antes && S.qr !== null) live.textContent = 'WhatsApp conectado.';
-      desenharEstado(); desenharConexao(); desenharVerificacao();
-      if (S.w.verificacao && S.w.verificacao.mensagem && S.w.verificacao.rodando) live.textContent = S.w.verificacao.mensagem;
+      const v = S.w.verificacao || {};
+      if (S.rodava && !v.rodando && v.mensagem) live.textContent = v.mensagem;
+      S.rodava = !!v.rodando;
+      desenharEstado(); desenharVerificacao();
     } catch (e) {
       if (!S.w) zonaEstado.replaceChildren(estadoErro(e.message, atualizar));
     }
-    agendar();
-  }
-  function agendar(forcar) {
     clearTimeout(S.timer);
-    const preciso = forcar || (S.qr && !(S.w && S.w.disponivel)) || (S.w && S.w.verificacao && S.w.verificacao.rodando);
-    if (S.vivo && preciso) S.timer = setTimeout(atualizar, 3000);
+    if (S.vivo && S.w && S.w.verificacao && S.w.verificacao.rodando) S.timer = setTimeout(atualizar, 2500);
   }
 
-  raiz.append(cabecalhoPagina('WhatsApp', 'Descubra quais números têm WhatsApp antes de disparar.'), live, zonaEstado, zonaConexao, aviso, zonaVerif);
+  raiz.append(cabecalhoPagina('WhatsApp', 'Descubra quais números têm WhatsApp, e se são pessoais ou comerciais, antes de disparar.'), live, zonaEstado, zonaVerif);
   try { S.listas = await api('/api/listas'); } catch (e) { S.listas = []; }
   if (rota !== app.rota) return;
   await atualizar();
 }
 
+/* gasto de IA do mês (API da Anthropic), com o teto */
+const NOMES_FUNCAO_IA = { busca: 'Busca por descrição', avaliacao: 'Avaliação dos contatos', 'avaliacao-lote': 'Avaliação em lote' };
+function blocoIA() {
+  const zona = h('div', {}, h('div', { class: 'cartao' }, esqueleto('50%', '22px')));
+  api('/api/ia').then((u) => {
+    const parte = u.teto_usd ? Math.min(100, u.gasto_usd / u.teto_usd * 100) : 0;
+    zona.replaceChildren(grupoAjustes('Inteligência artificial', [
+      ajuste({ icone: 'sparkle', tom: 'roxo', titulo: u.configurada ? 'Gasto do mês' : 'Chave não configurada',
+        descricao: u.configurada ? `Teto de ${usd(u.teto_usd)} por mês · ${num(u.chamadas)} chamadas` : 'Rode `uv run leads segredo ANTHROPIC_API_KEY` no servidor.',
+        valor: u.configurada ? usd(u.gasto_usd) : '—' }),
+      u.configurada ? h('div', { class: 'ajuste-barra' }, progresso(parte, 'Parte do teto já gasta')) : null,
+      ...(u.por_funcao || []).map((f) => ajuste({ icone: f.funcao === 'busca' ? 'busca' : 'estrela', tom: 'roxo', titulo: NOMES_FUNCAO_IA[f.funcao] || f.funcao, descricao: `${num(f.chamadas)} chamadas`, valor: usd(f.gasto_usd) })),
+      ajuste({ icone: 'info', tom: 'cinza', titulo: 'Modelos', descricao: `Busca: ${u.modelos.busca} · Avaliação: ${u.modelos.avaliacao}` })],
+      'Para a IA vão só dados públicos das empresas. O teto muda em GARIMPO_IA_TETO_USD, no .env do servidor.'));
+  }).catch((e) => zona.replaceChildren(grupoAjustes('Inteligência artificial', [ajuste({ icone: 'alerta', tom: 'cinza', titulo: 'Não deu para ler o gasto', descricao: e.message })])));
+  return zona;
+}
+
 /* ---------- Base de dados ---------- */
 async function telaBase(raiz) {
-  document.title = 'Base de dados · Solar Leads';
+  document.title = 'Base de dados · Garimpo';
   const rota = app.rota;
   const corpo = h('div', { class: 'ajustes-pilha' }, Array.from({ length: 3 }, () => h('div', { class: 'cartao', 'aria-hidden': 'true' }, esqueleto('50%', '22px'), esqueleto('100%', '70px'))));
   raiz.append(cabecalhoPagina('Base de dados', 'De onde vêm os contatos e quando cada fonte foi atualizada.'), corpo);
@@ -162,7 +181,7 @@ async function telaBase(raiz) {
         ajuste({ icone: 'check', tom: 'verde', titulo: 'Com WhatsApp', valor: num(w.com_whatsapp) }),
         ajuste({ icone: 'pessoa', tom: 'verde', titulo: 'Pessoais', valor: num(w.pessoais) }),
         ajuste({ icone: 'predio', tom: 'verde', titulo: 'Comerciais', valor: num(w.comerciais) })]),
-      blocoExportacoes(), blocoChaves(), blocoAcessos());
+      blocoIA(), blocoExportacoes(), blocoChaves(), blocoAcessos());
   }
   carregar();
 }

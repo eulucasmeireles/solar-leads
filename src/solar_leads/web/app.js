@@ -1,5 +1,5 @@
 'use strict';
-/* Solar Leads - roteador (SPA com hash) */
+/* Garimpo - roteador (SPA com hash) */
 
 function rotaAtual() {
   const partes = (location.hash || '#/').split('?');
@@ -45,7 +45,7 @@ function desenharBotaoTema() {
 }
 
 function iniciar() {
-  document.getElementById('marca-ic').append(icone('sol', 22));
+  document.getElementById('marca-ic').append(icone('gema', 22));
   desenharBotaoTema();
   // Com senha configurada, mostra "Sair".
   fetch('/api/sessao').then((r) => r.json()).then((s) => {

@@ -1,5 +1,5 @@
 'use strict';
-/* Solar Leads - utilitários. Todo dado da API entra no DOM por textContent/atributos. */
+/* Garimpo - utilitários. Todo dado da API entra no DOM por textContent/atributos. */
 
 const nfNum = new Intl.NumberFormat('pt-BR');
 const nfPct = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 });
@@ -42,6 +42,7 @@ function s(tag, attrs, ...filhos) {
 }
 
 const ICONES = {
+  gema: ['M7 3.5h10l4 5.5-9 11.5L3 9l4-5.5z', 'M3 9h18', 'M12 20.5L8.5 9 10.5 3.5M12 20.5L15.5 9 13.5 3.5'],
   sol: ['M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8z', 'M12 2.5v2M12 19.5v2M4.8 4.8l1.4 1.4M17.8 17.8l1.4 1.4M2.5 12h2M19.5 12h2M4.8 19.2l1.4-1.4M17.8 6.2l1.4-1.4'],
   olho: ['M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z', 'M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z'],
   olhofechado: ['M3 3l18 18', 'M10.7 5.1c.4-.1.9-.1 1.3-.1 6.4 0 10 7 10 7a17 17 0 0 1-3.1 4.1', 'M6.5 6.6C3.7 8.5 2 12 2 12s3.6 7 10 7c1.8 0 3.5-.5 4.9-1.3', 'M9.9 9.9a3 3 0 0 0 4.2 4.2'],
@@ -209,10 +210,13 @@ const PUBLICOS = [
   { valor: 'dono', titulo: 'Energia solar para o dono', apoio: 'Mostra o potencial de energia solar da casa e da empresa de cada dono.' },
   { valor: 'empresa', titulo: 'Outra oferta para a empresa', apoio: 'Esconde as notas de energia solar; a ordem é pela força do contato.' },
 ];
-const rotuloPublico = (m) => (publicoEmpresa(m) ? 'empresas' : 'donos (energia solar)');
+/* nome do perfil da lista; listas antigas não trazem o perfil e valem pelo público */
+const rotuloPublico = (m) => (m && m.perfil && m.perfil.nome) || (publicoEmpresa(m) ? 'Sem perfil' : 'Energia solar');
+/* a nota de 0 a 10 de cada contato: "potencial" nas listas de energia solar, "encaixe" no perfil nas outras */
+const nomeDaNota = (m) => (publicoEmpresa(m) ? 'encaixe' : 'potencial');
 /* o que só faz sentido no público "dono": filtros e ordens escondidos no público "empresa" */
-const FILTROS_SO_DONO = ['oportunidade', 'solar', 'aptidao_min'];
-const ORDENS_SO_DONO = ['aptidao'];
+const FILTROS_SO_DONO = ['oportunidade', 'solar'];
+const ORDENS_SO_DONO = [];
 const CAMPOS_SO_DONO_PADRAO = ['solar', 'solar_desde', 'solar_kw', 'solar_sistemas', 'solar_onde', 'oportunidade', 'aptidao_solar', 'potencial_casa', 'motivos_casa', 'potencial_empresa', 'motivos_solar'];
 function campoSoDono(chave) {
   const c = (app.campos || []).find((x) => x.chave === chave);

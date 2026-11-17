@@ -1,4 +1,4 @@
-"""Regras de aptidão para energia solar e de pontuação do contato.
+"""Regras de aptidão para energia solar, de encaixe no perfil e de pontuação do contato.
 
 Tudo aqui é ajustável: são pesos iniciais, não medidos em campanha.
 """
@@ -318,3 +318,73 @@ def oportunidade(casa: int, empresa: int, solar: str) -> str:
     if casa >= 5:
         return "Casa"
     return "Baixo potencial"
+
+
+# ---------- encaixe no perfil (qualquer nicho) ----------
+
+PORTES_PEQUENOS = ("03", "Pequeno porte")
+PORTES_MAIORES = ("05", "Médio ou grande")
+
+
+def _numero(valor) -> float | None:
+    if valor in (None, ""):
+        return None
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def peso_da_atividade(cnae: str | None, atividade: str | None, pesos: dict[str, int]) -> int:
+    """Peso (0 a 3) que o perfil dá à atividade do contato.
+
+    `pesos` vem do perfil: código CNAE de 7 dígitos (ou prefixo) -> peso, e também a descrição
+    da atividade -> peso, para listas antigas que não guardaram o código.
+    """
+    cnae = "".join(c for c in (cnae or "") if c.isdigit())
+    if cnae:
+        for n in (7, 5, 4, 2):
+            p = pesos.get(cnae[:n])
+            if p:
+                return int(p)
+    if atividade:
+        return int(pesos.get(atividade.strip().lower(), 0))
+    return 0
+
+
+def encaixe(linha: dict, pesos: dict[str, int] | None = None) -> tuple[int, list[str]]:
+    """Nota de 0 a 10 de quanto a empresa se encaixa no perfil, com os motivos.
+
+    Usa só o que a Receita informa: atividade (com o peso dado pelo perfil), anos de empresa,
+    porte, capital social e número de unidades. Serve para qualquer nicho; a nota de energia
+    solar continua sendo a `aptidao_solar`.
+    """
+    nota, motivos = 0, []
+    p = peso_da_atividade(linha.get("cnae"), linha.get("atividade"), pesos or {})
+    if p:
+        nota += p + 1
+        motivos.append({3: "atividade principal do perfil", 2: "atividade importante do perfil", 1: "atividade aceita pelo perfil"}.get(p, "atividade do perfil"))
+    anos = _numero(linha.get("idade_empresa"))
+    if anos is not None:
+        if anos >= 5:
+            nota += 2
+            motivos.append("mais de 5 anos de empresa")
+        elif anos >= 2:
+            nota += 1
+            motivos.append("mais de 2 anos de empresa")
+    porte = str(linha.get("porte") or "").strip()
+    if porte in PORTES_MAIORES:
+        nota += 2
+        motivos.append("porte médio ou grande")
+    elif porte in PORTES_PEQUENOS:
+        nota += 1
+        motivos.append("pequeno porte")
+    capital = _numero(linha.get("capital_social"))
+    if capital and capital >= 100_000:
+        nota += 1
+        motivos.append("capital social acima de R$ 100 mil")
+    unidades = _numero(linha.get("unidades_ativas"))
+    if unidades and unidades >= 2:
+        nota += 1
+        motivos.append("mais de uma unidade ativa")
+    return max(0, min(10, nota)), motivos

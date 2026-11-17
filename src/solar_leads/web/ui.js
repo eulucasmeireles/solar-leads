@@ -1,5 +1,5 @@
 'use strict';
-/* Solar Leads - componentes de interface reutilizáveis */
+/* Garimpo - componentes de interface reutilizáveis */
 
 /* ---------- avisos (toast) ---------- */
 function avisar(texto, tipo, link) {
@@ -278,6 +278,36 @@ function ajuste({ icone: ic, tom, titulo, descricao, valor, acao }) {
     ic ? h('span', { class: `ajuste-ic tom-${tom || 'azul'}` }, icone(ic, 20)) : null,
     h('div', { class: 'ajuste-tx' }, h('div', { class: 'ajuste-t', text: titulo }), descricao ? h('div', { class: 'ajuste-d', text: descricao }) : null),
     valor != null ? h('div', { class: 'ajuste-v' }, valor) : null, acao || null);
+}
+
+/* ---------- escolha do perfil da lista (cartões de opção) ---------- */
+const APOIO_PRONTOS = {
+  solar: 'Mostra o potencial de energia solar da casa e da empresa de cada dono.',
+  geral: 'Lista comum, sem nada de energia solar. A ordem é pela força do contato e pelo encaixe.',
+};
+function apoioDoPerfil(p) {
+  if (APOIO_PRONTOS[p.id]) return APOIO_PRONTOS[p.id];
+  const r = p.receita || {}, n = (r.atividades || []).length;
+  return r.oferta || r.cliente_ideal || `${num(n)} ${n === 1 ? 'atividade' : 'atividades'}`;
+}
+function opcoesPerfil({ perfis, valor, aoMudar }) {
+  const nome = uid('perfil');
+  let atual = valor;
+  const el = h('div', { class: 'opcoes-publico', role: 'radiogroup', 'aria-label': 'Perfil da lista' });
+  perfis.forEach((p) => {
+    const idc = uid('pf');
+    const input = h('input', { type: 'radio', name: nome, id: idc, value: p.id });
+    input.checked = p.id === valor;
+    input.addEventListener('change', () => { if (!input.checked) return; atual = p.id; if (aoMudar) aoMudar(p); });
+    el.append(h('label', { class: 'opcao-publico', for: idc }, input,
+      h('span', { class: 'op-tx' }, h('span', { class: 'op-t', text: p.nome }), h('span', { class: 'op-d', text: apoioDoPerfil(p) }))));
+  });
+  return { el, valor: () => atual };
+}
+let perfisCache = null;
+async function carregarPerfis(forcar) {
+  if (!perfisCache || forcar) perfisCache = await api('/api/perfis');
+  return perfisCache;
 }
 
 /* ---------- escolha do público da lista (dois cartões de opção) ---------- */

@@ -255,8 +255,10 @@ def test_csv_do_publico_empresa_sai_sem_as_colunas_de_solar():
     assert len(chaves) == len(cabecalhos) == len(pipeline.CHAVES) - len(pipeline.SO_DO_DONO)
     assert not {"solar", "solar_kw", "aptidao_solar", "potencial_casa", "oportunidade"} & set(chaves)
     assert {"telefone", "chance_dono", "whatsapp", "cidade", "uf", "tags"} <= set(chaves)
-    assert pipeline.chaves_do_publico("dono") == pipeline.CHAVES
-    assert pipeline.cabecalhos_do_publico("dono") == pipeline.CABECALHOS
+    # No público "dono" o encaixe é a própria nota solar: só ele sai do CSV.
+    assert pipeline.chaves_do_publico("dono") == [c for c in pipeline.CHAVES if c not in pipeline.SO_FORA_DO_SOLAR]
+    assert len(pipeline.cabecalhos_do_publico("dono")) == len(pipeline.CHAVES) - len(pipeline.SO_FORA_DO_SOLAR)
+    assert {"encaixe", "nota_ia", "motivo_ia"} <= set(chaves)
 
 
 def test_trocar_publico_reordena_a_lista_gravada_sem_perder_linhas(tmp_path):

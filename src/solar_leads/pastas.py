@@ -51,6 +51,19 @@ def _con() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS chaves_api (
           id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, comeco TEXT NOT NULL, hash TEXT NOT NULL UNIQUE,
           criada_em TEXT NOT NULL, ultimo_uso TEXT NOT NULL DEFAULT '', revogada_em TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS perfis (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL UNIQUE COLLATE NOCASE, receita TEXT NOT NULL,
+          criado_em TEXT NOT NULL, atualizado_em TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS ia_uso (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, quando TEXT NOT NULL, funcao TEXT NOT NULL, modelo TEXT NOT NULL,
+          entrada INTEGER NOT NULL DEFAULT 0, saida INTEGER NOT NULL DEFAULT 0,
+          cache_lido INTEGER NOT NULL DEFAULT 0, cache_gravado INTEGER NOT NULL DEFAULT 0,
+          custo_usd REAL NOT NULL DEFAULT 0, ref TEXT NOT NULL DEFAULT '');
+        CREATE INDEX IF NOT EXISTS ia_uso_quando ON ia_uso (quando);
+        CREATE TABLE IF NOT EXISTS ia_avaliacoes (
+          criterio TEXT NOT NULL, cnpj TEXT NOT NULL, nota INTEGER NOT NULL, motivo TEXT NOT NULL,
+          modelo TEXT NOT NULL, avaliado_em TEXT NOT NULL,
+          PRIMARY KEY (criterio, cnpj));
         """
     )
     try:  # coluna acrescentada depois da primeira versão
@@ -359,3 +372,30 @@ def registrar_acesso(tipo: str, ip: str = "") -> None:
 def acessos_recentes(limite: int = 30) -> list[dict]:
     with closing(_con()) as con:
         return [dict(l) for l in con.execute("SELECT quando, tipo, ip FROM acessos ORDER BY id DESC LIMIT ?", [limite]).fetchall()]
+
+
+# ---------- notas da IA (por critério e CNPJ) ----------
+
+def notas_da_ia(chave: str, cnpjs: list[str] | None = None) -> dict[str, tuple[int, str]]:
+    """Notas já dadas pela IA com este critério: CNPJ -> (nota, motivo)."""
+    with closing(_con()) as con:
+        if cnpjs is None:
+            linhas = con.execute("SELECT cnpj, nota, motivo FROM ia_avaliacoes WHERE criterio = ?", [chave]).fetchall()
+        else:
+            linhas = []
+            for i in range(0, len(cnpjs), 900):  # o SQLite limita o número de parâmetros
+                parte = cnpjs[i : i + 900]
+                linhas += con.execute(
+                    f"SELECT cnpj, nota, motivo FROM ia_avaliacoes WHERE criterio = ? AND cnpj IN ({','.join('?' * len(parte))})",
+                    [chave, *parte],
+                ).fetchall()
+    return {l["cnpj"]: (int(l["nota"]), l["motivo"]) for l in linhas}
+
+
+def gravar_notas_da_ia(chave: str, notas: dict[str, tuple[int, str]], modelo: str) -> None:
+    agora = _agora()
+    with closing(_con()) as con, con:
+        con.executemany(
+            "INSERT OR REPLACE INTO ia_avaliacoes (criterio, cnpj, nota, motivo, modelo, avaliado_em) VALUES (?, ?, ?, ?, ?, ?)",
+            [(chave, cnpj, int(n), m, modelo, agora) for cnpj, (n, m) in notas.items()],
+        )

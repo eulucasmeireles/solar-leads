@@ -1,4 +1,4 @@
-# API do Solar Leads (v1)
+# API do Garimpo (v1)
 
 Para as suas automações (n8n, GHL, scripts) lerem listas e retirarem contatos sem usar a senha do sistema.
 
@@ -24,6 +24,9 @@ Responde o nome da chave e a relação de rotas.
 | GET | `/atividades?q=padaria` | Busca de atividade econômica |
 | GET | `/campos` | Campos que cada contato traz |
 | GET | `/publico?palavra=solar&palavra=fotovolt&uf=MG` | Quantas empresas têm essas palavras no nome, por atividade e estado |
+| GET | `/perfis` | Perfis de busca: os prontos (`solar`, `geral`) e os salvos |
+| GET | `/perfis/{id}` | Um perfil: atividades com peso, filtros e critério da IA |
+| GET | `/ia` | Gasto de IA do mês, teto e modelos |
 | GET | `/listas` | Todas as listas |
 | POST | `/listas` | Gera uma lista |
 | GET | `/listas/{id}` | Status (`na_fila`, `gerando`, `pronta`, `erro`), etapa e resumo |
@@ -88,5 +91,44 @@ Por nome da empresa, num estado ou no Brasil (`uf` vazio):
     -d '{"palavras": ["solar", "fotovolt"], "uf": "", "cnaes": ["4321500"], "so_ativas": true, "publico": "empresa"}'
 
 Campos opcionais: `cnaes` (atividades), `so_ativas`, `incluir_mei`, `so_locais` (padrão `true`),
-`publico` (`dono` ou `empresa`). A resposta traz `{"id": "..."}`; consulte `/listas/{id}` até o `status` ser `pronta`
+`perfil` (`solar`, `geral` ou o número de um perfil salvo), `idade_min` (anos mínimos de empresa),
+`portes` (`01` micro, `03` pequeno, `05` médio ou grande) e `publico` (`dono` ou `empresa`, o jeito antigo).
+
+Com `perfil`, o que o pedido não disser vem do perfil: atividades, filtros, anos mínimos e porte.
+Gerar o mesmo perfil em outra cidade é só mudar `cidade` e `uf`:
+
+    -d '{"uf": "SP", "cidade": "Campinas", "perfil": "3"}'
+
+Sem `perfil`, vale o `publico`: `dono` é o perfil de energia solar (ANEEL, potencial da casa e da empresa)
+e `empresa` é lista sem perfil. A resposta traz `{"id": "..."}`; consulte `/listas/{id}` até o `status` ser `pronta`
 (cerca de um minuto).
+
+## Perfis, encaixe e nota da IA
+
+Um perfil é a receita de uma busca: o que se vende, o cliente ideal, as atividades (cada uma com peso
+de 1 a 3), os filtros e o critério que a IA usa para avaliar. Os perfis são criados pela tela
+(“Descrever com IA” no Início) e ficam salvos para gerar a mesma busca em qualquer cidade.
+
+Cada contato traz duas notas de 0 a 10:
+
+| Campo | O que é |
+|---|---|
+| `encaixe`, `motivos_encaixe` | Calculada pelo sistema, sem IA: peso da atividade no perfil, anos de empresa, porte, capital e unidades. Nas listas de energia solar é a nota solar (`aptidao_solar`). |
+| `nota_ia`, `motivo_ia` | Dada pela IA a cada empresa, com o critério do perfil, depois de “Avaliar com IA”. Vazia nos contatos ainda não avaliados. |
+
+Filtros e ordens novos em `/contatos`, `/exportar`, `/pdf` e `/retirar`: `encaixe_min`, `ia_min`,
+`ordem=encaixe` e `ordem=ia` (nota da IA, maior primeiro; sem nota no fim). `aptidao_min` e
+`ordem=aptidao` continuam aceitos e valem o mesmo que o encaixe.
+
+A busca por descrição e a avaliação ficam só na tela, porque gastam crédito da API da Anthropic.
+Para a IA vão só dados públicos das empresas (nome, atividade, porte, capital, anos, bairro, cidade);
+nunca telefone, e-mail, nome do dono ou CPF.
+
+## Verificação de WhatsApp
+
+Feita pela tela (WhatsApp, ou “Verificar WhatsApp” na lista), pelo serviço pago CheckLeaked: diz se o
+número tem WhatsApp e se a conta é pessoal ou comercial, sem usar nenhum número seu. Cada número
+consultado gasta 1 consulta do pacote, tenha WhatsApp ou não; quem já foi verificado nos últimos 30
+dias não gasta de novo. Ao terminar, a lista é refeita sozinha com os resultados: quem tem WhatsApp
+confirmado sobe, e os filtros `tipo_whatsapp=pessoal` e `tipo_whatsapp=business` passam a valer.
+

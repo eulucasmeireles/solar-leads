@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import aneel, chaves, cnpj_db, config, enriquecer, pastas, pipeline, relatorio, whatsapp
+from .. import aneel, avaliacao_ia, busca_ia, chaves, cnpj_db, config, consulta, enriquecer, ia, pastas, perfis, pipeline, relatorio, whatsapp
 from ..telefone import e164, normalizar, so_digitos
 
 AQUI = Path(__file__).parent
@@ -33,7 +33,7 @@ LISTAS = config.DADOS / "listas"
 MUNICIPIOS = config.DADOS / "municipios_uf.parquet"
 LISTAS.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Solar Leads", docs_url=None, redoc_url=None)
+app = FastAPI(title="Garimpo", docs_url=None, redoc_url=None)
 
 
 class Estaticos(StaticFiles):
@@ -57,7 +57,10 @@ app.mount("/static", Estaticos(directory=AQUI), name="static")
 LIMITE_SEM_ATIVIDADE = 700_000
 _fila: queue.Queue = queue.Queue()  # pedidos de lista, atendidos um por vez
 _cache: dict[str, tuple[float, object]] = {}
-_verificacao = {"thread": None, "parar": threading.Event(), "lista_id": None, "feitos_hoje": 0, "restantes": None, "mensagem": ""}
+_verificacao = {
+    "thread": None, "parar": threading.Event(), "lista_id": None, "feitos": 0, "total": 0, "mensagem": "", "resumo": None,
+}
+_meta_trava = threading.Lock()
 
 
 def _em_cache(chave: str, validade_s: float, calcular):
@@ -278,6 +281,18 @@ def _gravar_meta(meta: dict) -> None:
     temporario.replace(caminho)
 
 
+_migrando = threading.Lock()
+
+
+def _mexer_meta(id_: str, **campos) -> dict:
+    """Muda só alguns campos da lista, relendo do disco: não desfaz o que outra tarefa gravou no meio."""
+    with _meta_trava:
+        meta = _ler_meta(id_)
+        meta.update(campos)
+        _gravar_meta(meta)
+        return meta
+
+
 def _parquet(id_: str) -> Path:
     meta = _ler_meta(id_)
     if meta["status"] != "pronta":
@@ -285,7 +300,21 @@ def _parquet(id_: str) -> Path:
     arquivo = LISTAS / f"{id_}.parquet"
     if not arquivo.exists():
         raise HTTPException(404, "Lista não encontrada.")
+    if meta.get("versao", 1) < pipeline.VERSAO:
+        _migrar(meta, arquivo)
     return arquivo
+
+
+def _migrar(meta: dict, arquivo: Path) -> None:
+    """Lista gravada antes dos perfis: acrescenta encaixe e nota da IA uma vez, sem mudar a ordem."""
+    with _migrando:
+        meta = _ler_meta(meta["id"])
+        if meta.get("versao", 1) >= pipeline.VERSAO:
+            return
+        perfil = perfis.do_meta(meta)
+        pipeline.migrar(arquivo, _publico(meta), perfis.pesos(perfil, meta.get("atividades")))
+        meta.update(versao=pipeline.VERSAO, perfil=perfil)
+        _gravar_meta(meta)
 
 
 @app.exception_handler(duckdb.IOException)
@@ -300,6 +329,11 @@ for _arq in LISTAS.glob("*.json"):
     if _m.get("status") in ("gerando", "na_fila"):
         _m.update(status="erro", erro="A geração foi interrompida. Gere a lista de novo.")
         _gravar_meta(_m)
+    elif _m.get("atualizando"):  # atualização interrompida: a lista de antes continua valendo
+        _m.update(atualizando=None)
+        _gravar_meta(_m)
+for _arq in LISTAS.glob("*.novo.parquet"):
+    _arq.unlink(missing_ok=True)
 
 
 # ---------- dados de apoio ----------
@@ -451,20 +485,37 @@ def _estado_whatsapp() -> dict:
         return {"disponivel": False, "motivo": str(e), "conta": ""}
 
 
+def _servico_whatsapp() -> dict:
+    """O serviço pago que verifica os números (CheckLeaked): se tem chave e quanto saldo resta."""
+    configurado = bool(os.getenv("CHECKLEAKED_KEY", "").strip())
+    return {"nome": "CheckLeaked", "configurado": configurado, "saldo": consulta.saldo_checkleaked() if configurado else None}
+
+
+def _verificando() -> bool:
+    t = _verificacao["thread"]
+    return bool(t and t.is_alive())
+
+
 @app.get("/api/whatsapp")
 def estado_whatsapp() -> dict:
-    t = _verificacao["thread"]
     return {
-        **_em_cache("estado-whatsapp", 3, _estado_whatsapp),
+        "servico": _em_cache("servico-whatsapp", 60 if not _verificando() else 15, _servico_whatsapp),
         "totais": _em_cache("totais-whatsapp", 20, _totais_whatsapp),
         "verificacao": {
-            "rodando": bool(t and t.is_alive()),
+            "rodando": _verificando(),
             "lista_id": _verificacao["lista_id"],
-            "feitos_hoje": _verificacao["feitos_hoje"],
-            "restantes": _verificacao["restantes"],
+            "feitos": _verificacao["feitos"],
+            "total": _verificacao["total"],
             "mensagem": _verificacao["mensagem"],
+            "resumo": _verificacao["resumo"],
         },
     }
+
+
+@app.get("/api/whatsapp/conexao")
+def conexao_whatsapp() -> dict:
+    """O número próprio ligado ao Evolution GO (verificação antiga, só pela linha de comando)."""
+    return _em_cache("estado-whatsapp", 3, _estado_whatsapp)
 
 
 @app.post("/api/whatsapp/qr")
@@ -475,49 +526,87 @@ def qr_whatsapp() -> dict:
         raise HTTPException(409, str(e)) from e
 
 
+MAX_VERIFICAR = 5000  # números por pedido de verificação
+
+
+def _numeros_da_lista(meta: dict, quantidade: int) -> list[str]:
+    """Os próximos números da lista ainda sem WhatsApp verificado, na ordem da tela (nota da IA primeiro, se houver).
+
+    Devolve números nacionais (DDD + número), um por contato de disparo.
+    """
+    cte, params = _consulta(_parquet(meta["id"]), {}, {}, 0, 1, "")
+    ordem = "nota_ia DESC NULLS LAST, ordem" if (meta.get("avaliacao") or {}).get("avaliadas") else "ordem"
+    linhas = duckdb.connect().execute(
+        f"{cte} SELECT telefone FROM r WHERE whatsapp <> 'sim' AND telefone LIKE '+55%' ORDER BY {ordem} LIMIT ?",
+        params + [quantidade],
+    ).fetchall()
+    return [t[0].removeprefix("+55") for t in linhas]
+
+
+@app.get("/api/listas/{id_}/whatsapp")
+def estimativa_whatsapp(id_: str, quantidade: int = 500) -> dict:
+    """Antes de verificar: quantos números entram, quantos já estão no cadastro e quanto saldo isso gasta."""
+    meta = _ler_meta(id_)
+    quantidade = max(1, min(MAX_VERIFICAR, quantidade))
+    numeros = _numeros_da_lista(meta, quantidade)
+    con = cnpj_db.conectar(tentativas=2)
+    try:
+        ja = len(whatsapp.do_cache(con, numeros))
+    finally:
+        con.close()
+    servico = _em_cache("servico-whatsapp", 60, _servico_whatsapp)
+    return {"numeros": len(numeros), "ja_verificados": ja, "consultas": len(numeros) - ja, "servico": servico}
+
+
 class PedidoVerificacao(BaseModel):
     lista_id: str
+    quantidade: int = 500
 
 
 @app.post("/api/whatsapp/verificacao")
 def iniciar_verificacao(pedido: PedidoVerificacao) -> dict:
-    t = _verificacao["thread"]
-    if t and t.is_alive():
+    """Verifica pela CheckLeaked os próximos números da lista e, no fim, refaz a lista com os resultados."""
+    if _verificando():
         raise HTTPException(409, "Já existe uma verificação em andamento.")
-    if not _estado_whatsapp()["disponivel"]:
-        raise HTTPException(409, "Conecte um WhatsApp antes de iniciar a verificação.")
-    arquivo = _parquet(pedido.lista_id)
-    fila = [
-        tel[0].removeprefix("+55")
-        for tel in duckdb.connect().execute(
-            f"SELECT telefone FROM read_parquet('{arquivo}') WHERE faixa IN ('A', 'B') AND telefone <> '' ORDER BY ordem"
-        ).fetchall()
-    ]
+    if not os.getenv("CHECKLEAKED_KEY", "").strip():
+        raise HTTPException(409, "Falta a chave da CheckLeaked. Rode `leads segredo CHECKLEAKED_KEY` no servidor.")
+    meta = _ler_meta(pedido.lista_id)
+    numeros = _numeros_da_lista(meta, max(1, min(MAX_VERIFICAR, pedido.quantidade)))
+    if not numeros:
+        raise HTTPException(400, "Todos os contatos desta lista já têm o WhatsApp verificado.")
 
-    def avisar(texto: str, restantes: int | None, hoje: int | None) -> None:
-        _verificacao["mensagem"] = texto
-        _verificacao["restantes"] = restantes
-        if hoje is not None:
-            _verificacao["feitos_hoje"] = hoje
+    def avisar(texto: str, feitos: int, total: int) -> None:
+        _verificacao.update(mensagem=texto, feitos=feitos, total=total)
 
     def rodar() -> None:
         try:
-            _verificacao["mensagem"] = whatsapp.verificar_devagar(fila, parar=_verificacao["parar"], avisar=avisar)
+            r = consulta.verificar(numeros, parar=_verificacao["parar"], avisar=avisar)
+            _verificacao["resumo"] = r
+            _verificacao["mensagem"] = _frase_da_verificacao(r)
+            if r["com_whatsapp"] or r["sem_whatsapp"]:
+                _refazer(meta["id"], "Atualizando a lista com os WhatsApp verificados")
         except Exception as e:  # noqa: BLE001 - o motivo aparece na tela
             _verificacao["mensagem"] = f"Parou com erro: {type(e).__name__}: {e}"
         _cache.pop("totais-whatsapp", None)
+        _cache.pop("servico-whatsapp", None)
 
     _verificacao["parar"] = threading.Event()
-    _verificacao.update(lista_id=pedido.lista_id, restantes=len(fila), mensagem="Iniciando.")
+    _verificacao.update(lista_id=meta["id"], feitos=0, total=len(numeros), mensagem="Começando.", resumo=None)
     _verificacao["thread"] = threading.Thread(target=rodar, daemon=True)
     _verificacao["thread"].start()
-    return {"ok": True}
+    return {"ok": True, "numeros": len(numeros)}
+
+
+def _frase_da_verificacao(r: dict) -> str:
+    feitos = f"{r['consultas']} consultados"
+    achados = f"{r['com_whatsapp']} com WhatsApp ({r['pessoais']} pessoais, {r['comerciais']} comerciais), {r['sem_whatsapp']} sem"
+    return f"{r['motivo'].capitalize()}: {feitos}, {achados}." if r["consultas"] else r["motivo"].capitalize() + "."
 
 
 @app.delete("/api/whatsapp/verificacao")
 def parar_verificacao() -> dict:
     _verificacao["parar"].set()
-    _verificacao["mensagem"] = "Parando."
+    _verificacao["mensagem"] = "Parando ao fim desta rodada."
     return {"ok": True}
 
 
@@ -538,6 +627,11 @@ class NovaLista(BaseModel):
     incluir_mei: bool = False
     so_locais: bool = True
     validar_whatsapp: bool = False
+    # Perfil de busca ("solar", "geral" ou o número de um perfil salvo). Sem perfil, vale o público:
+    # "dono" é o perfil de energia solar, "empresa" é lista sem perfil.
+    perfil: str = ""
+    idade_min: int = 0  # anos mínimos de empresa (0 = qualquer)
+    portes: list[str] = []  # "01" micro, "03" pequeno, "05" médio ou grande (vazio = todos)
 
 
 def _publico(meta: dict) -> str:
@@ -545,9 +639,14 @@ def _publico(meta: dict) -> str:
     return meta.get("publico") or "dono"
 
 
+def _com_perfil(meta: dict) -> dict:
+    """A lista como a tela e a API veem: com o público e o perfil sempre preenchidos."""
+    return {**meta, "publico": _publico(meta), "perfil": perfis.do_meta(meta)}
+
+
 def _contar_para_o_cartao(meta: dict) -> None:
     """Os números do cartão saem da mesma consulta que a tela usa, para os dois baterem."""
-    cte, params = _consulta(LISTAS / f"{meta['id']}.parquet", {}, None, 0, 1, "")
+    cte, params = _consulta(LISTAS / f"{meta['id']}.parquet", {}, {}, 0, 1, "")
     n = duckdb.connect().execute(
         f"""{cte} SELECT count(*), count(*) FILTER (WHERE faixa = 'A'), count(*) FILTER (WHERE faixa = 'B'),
             count(*) FILTER (WHERE primeiro_nome <> ''), count(*) FILTER (WHERE email <> '') FROM r""",
@@ -556,7 +655,36 @@ def _contar_para_o_cartao(meta: dict) -> None:
     meta["resumo"].update(contatos_para_disparo=n[0], faixa_A=n[1], faixa_B=n[2], com_nome=n[3], com_email=n[4])
 
 
-def _gerar(meta: dict, codigo: str) -> None:
+VERIFICAR_AO_GERAR = 500  # "Verificar WhatsApp ao gerar" confere só os primeiros contatos
+
+
+def _codigo_do_municipio(meta: dict) -> str:
+    """Código do município da lista (as listas antigas não o guardaram); vazio nas listas por nome."""
+    if meta.get("palavras"):
+        return ""
+    if meta.get("codigo"):
+        return meta["codigo"]
+    achado = duckdb.connect().execute(
+        f"SELECT codigo FROM read_parquet('{_municipios()}') WHERE uf = ? AND nome = strip_accents(upper(?))",
+        [meta["uf"], meta["cidade"]],
+    ).fetchone()
+    if not achado:
+        raise HTTPException(404, "Cidade da lista não encontrada na base.")
+    return achado[0]
+
+
+def _refazer(id_: str, motivo: str) -> None:
+    """Refaz uma lista pronta com os mesmos parâmetros (WhatsApp novos, notas da IA). Ela segue aberta enquanto isso."""
+    meta = _mexer_meta(id_, atualizando=motivo)
+    _fila.put((meta, _codigo_do_municipio(meta), True))
+
+
+def _gerar(meta: dict, codigo: str, refazer: bool = False) -> None:
+    """Gera a lista. Com `refazer`, a lista pronta continua aberta e só é trocada no fim, sem verificar números."""
+    if refazer:
+        _gerar_de_novo(meta, codigo)
+        return
+
     def etapa(texto: str) -> None:
         meta["etapa"] = texto
         _gravar_meta(meta)
@@ -565,27 +693,43 @@ def _gerar(meta: dict, codigo: str) -> None:
         meta["status"] = "gerando"
         p = meta["parametros"]
         amplo = bool(meta.get("palavras"))  # lista por nome da empresa, num estado ou no país
+        perfil = perfis.do_meta(meta)
         con = cnpj_db.conectar()
         try:
             leads = enriquecer.enriquecer(
                 con, [], codigo, meta["uf"], cidade="" if amplo else meta["cidade"].title(),
                 cnaes=[a["codigo"] for a in meta["atividades"]] or [""],
                 so_ativas=p["so_ativas"], incluir_mei=p["incluir_mei"], so_locais=p.get("so_locais", True),
-                palavras=meta.get("palavras") or None, progresso=etapa,
+                palavras=meta.get("palavras") or None, progresso=etapa, solar=_publico(meta) == "dono",
             )
             etapa("Aproveitando os WhatsApp já verificados")
             # Sempre aproveita o que já foi verificado; consulta o resto só quando pedido.
             celulares = [t["tel"] for l in leads for t in l["telefones"] if t["faixa"] != "C"]
             tem_whatsapp = whatsapp.do_cache(con, celulares)
-            if p["validar_whatsapp"]:
-                try:
-                    tem_whatsapp = whatsapp.checar(con, celulares)
-                except whatsapp.WhatsAppIndisponivel as e:
-                    meta["aviso"] = f"WhatsApp não verificado por completo. {e}"
         finally:
             con.close()
         etapa("Montando a lista")
-        linhas, disparo = pipeline.montar(leads, "" if amplo else meta["cidade"], tem_whatsapp, publico=_publico(meta))
+        montar = lambda whats: pipeline.montar(  # noqa: E731
+            leads, "" if amplo else meta["cidade"], whats, publico=_publico(meta),
+            pesos=perfis.pesos(perfil, meta.get("atividades")),
+            filtros={"idade_min": p.get("idade_min", 0), "portes": p.get("portes", [])},
+            notas=_notas_guardadas(meta),
+        )
+        linhas, disparo = montar(tem_whatsapp)
+        if p["validar_whatsapp"]:
+            # Confere pela CheckLeaked os primeiros contatos da lista e monta de novo com as respostas.
+            numeros = [l["telefone"].removeprefix("+55") for l in disparo if l["whatsapp"] != "sim"][:VERIFICAR_AO_GERAR]
+            r = consulta.verificar(numeros, avisar=lambda texto, feitos, total: etapa(texto))
+            if r["consultas"] or r["do_cadastro"]:
+                con = cnpj_db.conectar()
+                try:
+                    tem_whatsapp = whatsapp.do_cache(con, celulares)
+                finally:
+                    con.close()
+                etapa("Montando a lista com os WhatsApp verificados")
+                linhas, disparo = montar(tem_whatsapp)
+            if r["motivo"] not in ("concluída", "todos os números já estavam verificados"):
+                meta["aviso"] = f"WhatsApp verificado só em parte: {r['motivo']}."
         pipeline.salvar_parquet(linhas, LISTAS / f"{meta['id']}.parquet")
         meta["resumo"] = pipeline.resumir(linhas, disparo, whatsapp_verificado=bool(tem_whatsapp))
         _contar_para_o_cartao(meta)
@@ -596,11 +740,75 @@ def _gerar(meta: dict, codigo: str) -> None:
         _gravar_meta(meta)
 
 
+def _gerar_de_novo(meta: dict, codigo: str) -> None:
+    """Refaz a lista com os mesmos parâmetros, sem tirá-la do ar: grava ao lado e troca no fim."""
+    id_ = meta["id"]
+    try:
+        meta = _ler_meta(id_)
+        p = meta["parametros"]
+        amplo = bool(meta.get("palavras"))
+        perfil = perfis.do_meta(meta)
+        con = cnpj_db.conectar()
+        try:
+            leads = enriquecer.enriquecer(
+                con, [], codigo, meta["uf"], cidade="" if amplo else meta["cidade"].title(),
+                cnaes=[a["codigo"] for a in meta["atividades"]] or [""],
+                so_ativas=p["so_ativas"], incluir_mei=p["incluir_mei"], so_locais=p.get("so_locais", True),
+                palavras=meta.get("palavras") or None, solar=_publico(meta) == "dono",
+                progresso=lambda texto: _mexer_meta(id_, atualizando=texto),
+            )
+            celulares = [t["tel"] for l in leads for t in l["telefones"] if t["faixa"] != "C"]
+            tem_whatsapp = whatsapp.do_cache(con, celulares)
+        finally:
+            con.close()
+        _mexer_meta(id_, atualizando="Montando a lista")
+        meta = _ler_meta(id_)  # as notas da IA podem ter mudado enquanto isso
+        linhas, disparo = pipeline.montar(
+            leads, "" if amplo else meta["cidade"], tem_whatsapp, publico=_publico(meta),
+            pesos=perfis.pesos(perfil, meta.get("atividades")),
+            filtros={"idade_min": p.get("idade_min", 0), "portes": p.get("portes", [])},
+            notas=_notas_guardadas(meta),
+        )
+        provisorio = LISTAS / f"{id_}.novo.parquet"
+        pipeline.salvar_parquet(linhas, provisorio)
+        with _meta_trava:
+            provisorio.replace(LISTAS / f"{id_}.parquet")
+            meta = _ler_meta(id_)
+            meta["resumo"] = pipeline.resumir(linhas, disparo, whatsapp_verificado=bool(tem_whatsapp))
+            _contar_para_o_cartao(meta)
+            meta.update(atualizando=None, versao=pipeline.VERSAO, codigo=codigo)
+            _gravar_meta(meta)
+    except Exception as e:  # noqa: BLE001 - a lista antiga continua valendo; o motivo vai para a tela
+        try:
+            _mexer_meta(id_, atualizando=None, aviso=f"Não deu para atualizar a lista: {type(e).__name__}: {e}")
+        except HTTPException:
+            pass  # a lista foi excluída no meio
+
+
+def _notas_guardadas(meta: dict) -> dict[str, tuple[int, str]]:
+    """Notas da IA já dadas às empresas desta lista (refazer a lista não as perde nem paga de novo)."""
+    chave = (meta.get("avaliacao") or {}).get("chave")
+    return pastas.notas_da_ia(chave) if chave else {}
+
+
+def _migrar_todas() -> None:
+    """Ao ligar, leva as listas de antes dos perfis ao formato novo, para ninguém esperar ao abri-las."""
+    for arq in sorted(LISTAS.glob("*.json")):
+        try:
+            meta = json.loads(arq.read_text())
+            parquet = LISTAS / f"{meta['id']}.parquet"
+            if meta.get("status") == "pronta" and meta.get("versao", 1) < pipeline.VERSAO and parquet.exists():
+                _migrar(meta, parquet)
+        except Exception as e:  # noqa: BLE001 - uma lista com problema não impede as outras
+            print(f"Lista {arq.stem} não migrada: {type(e).__name__}: {e}", flush=True)
+
+
 def _atender_fila() -> None:
+    _migrar_todas()
     while True:
-        meta, codigo = _fila.get()
+        meta, codigo, *refazer = _fila.get()
         if _meta_caminho(meta["id"]).exists():  # pode ter sido excluída enquanto esperava
-            _gerar(meta, codigo)
+            _gerar(meta, codigo, bool(refazer and refazer[0]))
 
 
 threading.Thread(target=_atender_fila, daemon=True).start()
@@ -689,9 +897,30 @@ def criar_lista(pedido: NovaLista) -> dict:
     con = duckdb.connect()
     cnaes = sorted({"".join(c for c in x if c.isdigit()) for x in pedido.cnaes} - {""})
     palavras = _palavras(pedido.palavras)
-    publico = pedido.publico.strip() or ("empresa" if palavras else "dono")
-    if publico not in pipeline.PUBLICOS:
-        raise HTTPException(400, "Público desconhecido.")
+    if pedido.perfil.strip():
+        perfil = perfis.um(pedido.perfil)
+        if not perfil:
+            raise HTTPException(404, "Perfil não encontrado.")
+        publico = "dono" if perfil["solar"] else "empresa"
+    else:
+        publico = pedido.publico.strip() or ("empresa" if palavras else "dono")
+        if publico not in pipeline.PUBLICOS:
+            raise HTTPException(400, "Público desconhecido.")
+        perfil = perfis.PRONTOS[perfis.SOLAR if publico == "dono" else perfis.GERAL]
+    # O que o pedido não disse vem do perfil: atividades, palavras e filtros.
+    dito = pedido.model_fields_set
+    receita = perfil["receita"]
+    conhecidas = {a["codigo"]: a["descricao"] for a in receita["atividades"]}
+    if "cnaes" not in dito and not palavras:
+        cnaes = sorted(conhecidas)
+    if "palavras" not in dito and not cnaes and receita["palavras"]:
+        palavras = _palavras(receita["palavras"])
+    f = receita["filtros"]
+    so_ativas = pedido.so_ativas if "so_ativas" in dito else f["so_ativas"]
+    incluir_mei = pedido.incluir_mei if "incluir_mei" in dito else f["incluir_mei"]
+    so_locais = pedido.so_locais if "so_locais" in dito else f["so_locais"]
+    portes = sorted({str(x).zfill(2) for x in (pedido.portes if "portes" in dito else f["portes"])} & set(perfis.PORTES))
+    idade_min = max(0, min(50, pedido.idade_min if "idade_min" in dito else f["idade_min"]))
     if palavras:
         uf = _uf_valida(pedido.uf)
         # achado: (código do município, nome da lista, nº de empresas) — aqui não há município.
@@ -711,13 +940,16 @@ def criar_lista(pedido: NovaLista) -> dict:
             f"{achado[1].title()} tem {achado[2]:,} empresas".replace(",", ".")
             + ", muito para uma lista só. Escolha as atividades que interessam e gere por partes.",
         )
-    descricoes = dict(
-        con.execute(
-            f"SELECT trim(codigo), descricao FROM read_parquet('{config.CNPJ_PARQUET}/cnaes_*.parquet') "
-            "WHERE trim(codigo) IN (SELECT unnest(?))",
-            [cnaes],
-        ).fetchall()
-    )
+    descricoes = {c: conhecidas[c] for c in cnaes if conhecidas.get(c)}
+    faltam = [c for c in cnaes if c not in descricoes]
+    if faltam:
+        descricoes |= dict(
+            con.execute(
+                f"SELECT trim(codigo), descricao FROM read_parquet('{config.CNPJ_PARQUET}/cnaes_*.parquet') "
+                "WHERE trim(codigo) IN (SELECT unnest(?))",
+                [faltam],
+            ).fetchall()
+        )
     agora = datetime.now()
     id_ = f"{agora:%Y%m%d-%H%M%S}-{pipeline.slug(achado[1])[:40]}-{uf.lower() or 'br'}"
     while (LISTAS / f"{id_}.json").exists():
@@ -729,10 +961,13 @@ def criar_lista(pedido: NovaLista) -> dict:
         "uf": uf,
         "palavras": palavras,
         "publico": publico,
+        "perfil": perfis.retrato(perfil),
+        "versao": pipeline.VERSAO,
+        "codigo": achado[0],
         "atividades": [{"codigo": c, "descricao": descricoes.get(c, c)} for c in cnaes],
         "parametros": {
-            "so_ativas": pedido.so_ativas, "incluir_mei": pedido.incluir_mei, "so_locais": pedido.so_locais,
-            "validar_whatsapp": pedido.validar_whatsapp,
+            "so_ativas": so_ativas, "incluir_mei": incluir_mei, "so_locais": so_locais,
+            "validar_whatsapp": pedido.validar_whatsapp, "idade_min": idade_min, "portes": portes,
         },
         "status": "na_fila",
         "etapa": "Aguardando a vez na fila",
@@ -748,13 +983,12 @@ def criar_lista(pedido: NovaLista) -> dict:
 @app.get("/api/listas")
 def listar() -> list[dict]:
     metas = [json.loads(a.read_text()) for a in LISTAS.glob("*.json")]
-    return sorted(({**m, "publico": _publico(m)} for m in metas), key=lambda m: m["criada_em"], reverse=True)
+    return sorted((_com_perfil(m) for m in metas), key=lambda m: m["criada_em"], reverse=True)
 
 
 @app.get("/api/listas/{id_}")
 def uma_lista(id_: str) -> dict:
-    meta = _ler_meta(id_)
-    return {**meta, "publico": _publico(meta)}
+    return _com_perfil(_ler_meta(id_))
 
 
 class Publico(BaseModel):
@@ -773,11 +1007,302 @@ def mudar_publico(id_: str, pedido: Publico) -> dict:
     if meta["status"] != "pronta":
         raise HTTPException(409, "Espere a lista ficar pronta para mudar o público.")
     if pedido.publico != _publico(meta):
-        pipeline.trocar_publico(_parquet(id_), "" if meta.get("palavras") else meta["cidade"], pedido.publico)
-        meta["publico"] = pedido.publico
+        arquivo = _parquet(id_)
+        meta = _ler_meta(id_)
+        # Trocar o público troca o perfil pelo pronto correspondente; um perfil salvo vira "sem perfil".
+        perfil = perfis.retrato(perfis.PRONTOS[perfis.SOLAR if pedido.publico == "dono" else perfis.GERAL])
+        if pedido.publico == "empresa" and not meta.get("perfil", {}).get("solar", True):
+            perfil = meta["perfil"]
+        pipeline.trocar_publico(
+            arquivo, "" if meta.get("palavras") else meta["cidade"], pedido.publico, perfis.pesos(perfil, meta.get("atividades"))
+        )
+        meta.update(publico=pedido.publico, perfil=perfil)
         _contar_para_o_cartao(meta)
         _gravar_meta(meta)
-    return meta
+    return _com_perfil(meta)
+
+
+# ---------- IA: busca por descrição ----------
+
+_buscas: dict[str, dict] = {}
+
+
+class PedidoBusca(BaseModel):
+    texto: str
+
+
+def _custo_da_ref(ref: str) -> float:
+    from contextlib import closing
+
+    with closing(pastas._con()) as con:
+        return round(float(con.execute("SELECT coalesce(sum(custo_usd), 0) FROM ia_uso WHERE ref = ?", [ref]).fetchone()[0]), 4)
+
+
+@app.get("/api/ia")
+def uso_da_ia() -> dict:
+    return ia.uso_do_mes()
+
+
+@app.post("/api/ia/busca")
+def iniciar_busca(pedido: PedidoBusca) -> dict:
+    """A IA monta um perfil a partir da descrição. Leva cerca de um minuto; acompanhe em /api/ia/busca/{id}."""
+    try:
+        if not ia.configurada():
+            raise ia.IaIndisponivel("Falta a chave da Anthropic. Rode `uv run leads segredo ANTHROPIC_API_KEY` no servidor.")
+        ia.conferir_teto(0.30)
+    except ia.IaIndisponivel as e:
+        raise HTTPException(409, str(e)) from e
+    texto = pedido.texto.strip()
+    if not 10 <= len(texto) <= 2000:
+        raise HTTPException(400, "Descreva em 10 a 2.000 letras o que você vende e quem quer encontrar.")
+    if any(b["status"] == "pensando" for b in _buscas.values()):
+        raise HTTPException(409, "Já existe uma busca com IA em andamento. Espere ela terminar.")
+    id_ = os.urandom(6).hex()
+    estado = {"id": id_, "status": "pensando", "etapa": "Começando", "texto": texto, "proposta": None, "erro": None,
+              "criada_em": datetime.now().isoformat(timespec="seconds")}
+    _buscas[id_] = estado
+    for velho in sorted(_buscas, key=lambda k: _buscas[k]["criada_em"])[:-20]:
+        _buscas.pop(velho, None)
+
+    def rodar() -> None:
+        try:
+            estado["proposta"] = busca_ia.montar_perfil(texto, etapa=lambda t: estado.update(etapa=t), ref=f"busca:{id_}")
+            estado["status"] = "pronta"
+        except ia.IaIndisponivel as e:
+            estado.update(status="erro", erro=str(e))
+        except Exception as e:  # noqa: BLE001 - o motivo vai para a tela
+            estado.update(status="erro", erro=f"{type(e).__name__}: {e}")
+
+    threading.Thread(target=rodar, daemon=True).start()
+    return {"id": id_}
+
+
+@app.get("/api/ia/busca/{busca_id}")
+def andamento_da_busca(busca_id: str) -> dict:
+    estado = _buscas.get(busca_id)
+    if not estado:
+        raise HTTPException(404, "Busca não encontrada (o servidor pode ter reiniciado). Descreva de novo.")
+    return {**estado, "custo_usd": _custo_da_ref(f"busca:{busca_id}")}
+
+
+class Contagem(BaseModel):
+    cidade: str = ""
+    uf: str = ""
+    codigos: list[str] = []
+    so_ativas: bool = True
+    incluir_mei: bool = False
+    idade_min: int = 0
+    portes: list[str] = []
+
+
+@app.post("/api/perfis/contar")
+def contar_para_o_perfil(c: Contagem) -> dict:
+    """Quantas empresas cada atividade tem na cidade com os filtros: para ajustar a proposta antes de gerar."""
+    con = cnpj_db.conectar(tentativas=5)
+    try:
+        return busca_ia.contar_empresas(
+            con, cidade=c.cidade, uf=c.uf, codigos=c.codigos, so_ativas=c.so_ativas, incluir_mei=c.incluir_mei,
+            idade_min=max(0, min(50, c.idade_min)), portes=c.portes,
+        )
+    finally:
+        con.close()
+
+
+# ---------- IA: avaliação dos contatos ----------
+
+_avaliacao = {"thread": None, "parar": threading.Event(), "lista_id": None, "feitos": 0, "total": 0, "mensagem": "", "resumo": None, "amostra": None}
+_CAMPOS_PUBLICOS = (
+    "cnpj, empresa, razao_social, atividade, porte, capital_social, idade_empresa, natureza, simples, situacao, "
+    "unidades_ativas, numero_socios, atividades_secundarias, bairro, cidade, uf"
+)
+
+
+def _avaliando() -> bool:
+    t = _avaliacao["thread"]
+    return bool(t and t.is_alive())
+
+
+def _empresas_para_avaliar(meta: dict, quantidade: int) -> list[dict]:
+    """As primeiras empresas da lista (uma linha por CNPJ, na ordem da tela), só com os campos públicos."""
+    cte, params = _consulta(_parquet(meta["id"]), {}, {}, 0, 1, "")
+    cur = duckdb.connect().execute(
+        f"""{cte} SELECT {_CAMPOS_PUBLICOS} FROM (
+              SELECT * FROM r WHERE cnpj <> '' QUALIFY row_number() OVER (PARTITION BY cnpj ORDER BY ordem) = 1
+            ) ORDER BY ordem LIMIT ?""",
+        params + [quantidade],
+    )
+    return _linhas(cur)
+
+
+def _criterio_da_lista(meta: dict, escrito: str = "") -> str:
+    return (escrito or "").strip() or (meta.get("avaliacao") or {}).get("criterio") or perfis.criterio(perfis.do_meta(meta))
+
+
+def _andamento_da_avaliacao() -> dict:
+    return {k: _avaliacao[k] for k in ("lista_id", "feitos", "total", "mensagem", "resumo", "amostra")} | {"rodando": _avaliando()}
+
+
+@app.get("/api/listas/{id_}/avaliacao")
+def estado_da_avaliacao(id_: str, quantidade: int = 500, criterio: str = "", so_andamento: int = 0) -> dict:
+    """Antes de avaliar: o critério, quantas empresas entram, quantas já têm nota e o custo estimado.
+
+    Com `so_andamento=1` (a tela consultando a cada segundo), só o andamento, sem refazer as contas.
+    """
+    meta = _ler_meta(id_)
+    if so_andamento:
+        return {"avaliacao": meta.get("avaliacao"), "andamento": _andamento_da_avaliacao()}
+    quantidade = max(1, min(avaliacao_ia.LIMITE_DIRETO * 20, quantidade))
+    texto = _criterio_da_lista(meta, criterio)
+    empresas = _empresas_para_avaliar(meta, quantidade) if meta["status"] == "pronta" else []
+    ja = len(pastas.notas_da_ia(avaliacao_ia.chave(texto), [e["cnpj"] for e in empresas])) if texto else 0
+    falta = len(empresas) - ja
+    uso = ia.uso_do_mes()
+    return {
+        "criterio": texto, "empresas": len(empresas), "ja_avaliadas": ja, "a_avaliar": falta,
+        "custo_usd": avaliacao_ia.estimar_usd(falta), "em_lote": falta > avaliacao_ia.LIMITE_DIRETO,
+        "gasto_usd": uso["gasto_usd"], "teto_usd": uso["teto_usd"], "configurada": uso["configurada"],
+        "avaliacao": meta.get("avaliacao"),
+        "andamento": _andamento_da_avaliacao(),
+    }
+
+
+class PedidoAvaliacao(BaseModel):
+    quantidade: int = 500
+    criterio: str = ""
+    amostra: bool = False
+
+
+TAMANHO_DA_AMOSTRA = 30
+
+
+@app.post("/api/listas/{id_}/avaliar")
+def avaliar_lista(id_: str, pedido: PedidoAvaliacao) -> dict:
+    """A IA dá nota de 0 a 10 às primeiras empresas da lista. Com `amostra`, só as 30 primeiras, para conferir."""
+    meta = _ler_meta(id_)
+    _parquet(id_)
+    if _avaliando():
+        raise HTTPException(409, "Já existe uma avaliação em andamento.")
+    criterio = _criterio_da_lista(meta, pedido.criterio)
+    quantidade = TAMANHO_DA_AMOSTRA if pedido.amostra else max(1, min(avaliacao_ia.LIMITE_DIRETO * 20, pedido.quantidade))
+    empresas = _empresas_para_avaliar(meta, quantidade)
+    try:
+        if not ia.configurada():
+            raise ia.IaIndisponivel("Falta a chave da Anthropic. Rode `uv run leads segredo ANTHROPIC_API_KEY` no servidor.")
+        if len(criterio) < 15:
+            raise ia.IaIndisponivel("Escreva o critério: o que você vende e quem é o cliente ideal.")
+        k = avaliacao_ia.chave(criterio)
+        falta = len(empresas) - len(pastas.notas_da_ia(k, [e["cnpj"] for e in empresas]))
+        ia.conferir_teto(avaliacao_ia.estimar_usd(falta))
+    except ia.IaIndisponivel as e:
+        raise HTTPException(409, str(e)) from e
+
+    def avisar(texto: str, feitos: int, total: int) -> None:
+        _avaliacao.update(mensagem=texto, feitos=feitos, total=total)
+
+    def rodar() -> None:
+        try:
+            r = avaliacao_ia.avaliar(empresas, criterio, parar=_avaliacao["parar"], avisar=avisar, ref=f"lista:{id_}")
+            _avaliacao["resumo"] = r
+            _aplicar_notas(id_, criterio)
+            if pedido.amostra:
+                notas = pastas.notas_da_ia(k, [e["cnpj"] for e in empresas])
+                _avaliacao["amostra"] = sorted(
+                    ({"empresa": e["empresa"], "atividade": e["atividade"], "nota": notas[e["cnpj"]][0], "motivo": notas[e["cnpj"]][1]}
+                     for e in empresas if e["cnpj"] in notas),
+                    key=lambda a: -a["nota"],
+                )
+            feitas = r["avaliadas"] + r["ja_tinham"]
+            _avaliacao["mensagem"] = (
+                f"{r['motivo'].capitalize()}: {feitas} empresas com nota"
+                + (f", {r['recusadas']} sem nota" if r["recusadas"] else "")
+                + (f" · US$ {r['custo_usd']:.4f}" if r["custo_usd"] else "") + "."
+            )
+        except ia.IaIndisponivel as e:
+            _avaliacao["mensagem"] = str(e)
+        except Exception as e:  # noqa: BLE001 - o motivo aparece na tela
+            _avaliacao["mensagem"] = f"Parou com erro: {type(e).__name__}: {e}"
+
+    _avaliacao["parar"] = threading.Event()
+    _avaliacao.update(lista_id=id_, feitos=0, total=len(empresas), mensagem="Começando.", resumo=None, amostra=None)
+    _avaliacao["thread"] = threading.Thread(target=rodar, daemon=True)
+    _avaliacao["thread"].start()
+    return {"ok": True, "empresas": len(empresas)}
+
+
+@app.delete("/api/listas/{id_}/avaliar")
+def parar_avaliacao(id_: str) -> dict:
+    _avaliacao["parar"].set()
+    _avaliacao["mensagem"] = "Parando."
+    return {"ok": True}
+
+
+def _aplicar_notas(id_: str, criterio: str) -> None:
+    """Grava na lista as notas da IA com este critério e anota na lista o que foi avaliado."""
+    k = avaliacao_ia.chave(criterio)
+    notas = pastas.notas_da_ia(k)
+    arquivo = _parquet(id_)
+    with _meta_trava:
+        pipeline.trocar_notas_da_ia(arquivo, notas)
+        avaliadas = duckdb.connect().execute(
+            f"SELECT count(DISTINCT cnpj) FROM read_parquet('{arquivo}') WHERE nota_ia IS NOT NULL"
+        ).fetchone()[0]
+        meta = _ler_meta(id_)
+        meta["avaliacao"] = {
+            "chave": k, "criterio": criterio, "modelo": ia.MODELO_AVALIACAO, "avaliadas": avaliadas,
+            "custo_usd": _custo_da_ref(f"lista:{id_}"), "em": datetime.now().isoformat(timespec="seconds"),
+        }
+        _gravar_meta(meta)
+
+
+# ---------- perfis de busca ----------
+
+class NovoPerfil(BaseModel):
+    nome: str
+    receita: dict = {}
+
+
+def _perfil_ou_404(perfil_id: str) -> dict:
+    perfil = perfis.um(perfil_id)
+    if not perfil:
+        raise HTTPException(404, "Perfil não encontrado.")
+    return perfil
+
+
+@app.get("/api/perfis")
+def listar_perfis() -> list[dict]:
+    return perfis.listar()
+
+
+@app.get("/api/perfis/{perfil_id}")
+def um_perfil(perfil_id: str) -> dict:
+    return _perfil_ou_404(perfil_id)
+
+
+@app.post("/api/perfis")
+def criar_perfil(novo: NovoPerfil) -> dict:
+    try:
+        return perfis.criar(novo.nome, novo.receita)
+    except perfis.PerfilInvalido as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.put("/api/perfis/{perfil_id}")
+def mudar_perfil(perfil_id: str, novo: NovoPerfil) -> dict:
+    _perfil_ou_404(perfil_id)
+    try:
+        return perfis.atualizar(perfil_id, novo.nome, novo.receita)
+    except perfis.PerfilInvalido as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.delete("/api/perfis/{perfil_id}")
+def excluir_perfil(perfil_id: str) -> dict:
+    _perfil_ou_404(perfil_id)
+    try:
+        perfis.excluir(perfil_id)
+    except perfis.PerfilInvalido as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True}
 
 
 @app.delete("/api/listas/{id_}")
@@ -795,7 +1320,10 @@ def excluir(id_: str) -> dict:
 _FILTROS_IN = ("faixa", "situacao", "papel", "bairro", "atividade", "tipo_whatsapp", "solar", "oportunidade", "uf", "cidade")
 _ORDENS = {
     "relevancia": "ordem",
-    "aptidao": "aptidao_solar DESC, ordem",
+    # "aptidao" é o nome antigo: o encaixe no perfil, que nas listas de energia solar é a própria nota solar.
+    "aptidao": "encaixe DESC, ordem",
+    "encaixe": "encaixe DESC, ordem",
+    "ia": "nota_ia DESC NULLS LAST, ordem",
     "chance": "chance_dono DESC, ordem",
     "nome": "primeiro_nome, sobrenome, ordem",
     "empresa": "empresa, ordem",
@@ -803,10 +1331,11 @@ _ORDENS = {
 
 
 def _consulta(
-    arquivo: Path, filtros: dict, aptidao_min: int | None, com_email: int, so_disparo: int, busca: str, pasta: str | None = None
+    arquivo: Path, filtros: dict, minimos: dict | None, com_email: int, so_disparo: int, busca: str, pasta: str | None = None
 ):
     """Monta o SQL (CTE `r` com as linhas do filtro) e seus parâmetros.
 
+    `minimos`: nota mínima por coluna (`encaixe`, `nota_ia`).
     `pasta`: "fora" deixa só quem não está em nenhuma pasta; um id deixa só quem está naquela.
     """
     cond, params = ["true"], []
@@ -815,9 +1344,10 @@ def _consulta(
         if valores:
             cond.append(f"{campo} IN (SELECT unnest(?))")
             params.append(valores)
-    if aptidao_min:
-        cond.append("aptidao_solar >= ?")
-        params.append(aptidao_min)
+    for coluna, minimo in (minimos or {}).items():
+        if minimo:
+            cond.append(f"{coluna} >= ?")
+            params.append(minimo)
     if com_email:
         cond.append("email <> ''")
     if busca.strip():
@@ -859,18 +1389,21 @@ class Filtros:
         atividade: Lista = None, tipo_whatsapp: Lista = None, solar: Lista = None, oportunidade: Lista = None,
         uf: Lista = None, cidade: Lista = None,
         aptidao_min: int | None = None, com_email: int = 0, so_disparo: int = 1, busca: str = "",
-        ordem: str = "relevancia", pasta: str | None = None,
+        ordem: str = "relevancia", pasta: str | None = None, encaixe_min: int | None = None, ia_min: int | None = None,
     ) -> None:
         self.em = {
             "faixa": faixa, "situacao": situacao, "papel": papel, "bairro": bairro, "atividade": atividade,
             "tipo_whatsapp": tipo_whatsapp, "solar": solar, "oportunidade": oportunidade, "uf": uf, "cidade": cidade,
         }
         self.aptidao_min, self.com_email, self.so_disparo, self.busca = aptidao_min, com_email, so_disparo, busca
+        self.encaixe_min, self.ia_min = encaixe_min, ia_min
+        # `aptidao_min` (nome antigo) e `encaixe_min` filtram a mesma nota: nas listas solares, encaixe = nota solar.
+        self.minimos = {"encaixe": max(aptidao_min or 0, encaixe_min or 0) or None, "nota_ia": ia_min}
         self.ordem = _ORDENS.get(ordem, "ordem")
         self.pasta = pasta
 
     def consulta(self, arquivo: Path, pasta: str | None = None):
-        return _consulta(arquivo, self.em, self.aptidao_min, self.com_email, self.so_disparo, self.busca, pasta or self.pasta)
+        return _consulta(arquivo, self.em, self.minimos, self.com_email, self.so_disparo, self.busca, pasta or self.pasta)
 
 
 @app.get("/api/listas/{id_}/filtros")
@@ -963,7 +1496,8 @@ def painel(id_: str, f: Annotated[Filtros, Depends()]) -> dict:
         "solar": grupo("solar"),
         "whatsapp": grupo("CASE WHEN tipo_whatsapp <> '' THEN tipo_whatsapp ELSE 'não verificado' END"),
         "idade": [{"valor": i, "n": idades[i]} for i in _IDADES if i in idades],
-        "aptidao": grupo("aptidao_solar", ordem="1"),
+        "aptidao": grupo("encaixe", ordem="1"),
+        "nota_ia": grupo("nota_ia", "nota_ia IS NOT NULL", ordem="1"),
         "atividades": grupo("atividade", "atividade <> ''", limite=10),
         "bairros": grupo("bairro", "bairro <> ''", limite=10),
         "solar_por_ano": grupo(
@@ -993,7 +1527,7 @@ def exportar(id_: str, f: Annotated[Filtros, Depends()], request: Request) -> St
     pastas.registrar_exportacao("lista", id_, f"Lista de {_rotulo(meta)}", len(linhas), _ip(request))
     return _csv(
         linhas,
-        f"solar-leads-{pipeline.slug(meta['cidade'])[:40]}-{meta['uf'].lower() or 'br'}-{datetime.now():%Y%m%d-%H%M}.csv",
+        f"garimpo-{pipeline.slug(meta['cidade'])[:40]}-{meta['uf'].lower() or 'br'}-{datetime.now():%Y%m%d-%H%M}.csv",
         _publico(meta),
     )
 
@@ -1004,7 +1538,7 @@ _FAIXAS = {"A": "contatos fortes", "B": "contatos médios"}
 _TIPOS_WHATSAPP = {"pessoal": "WhatsApp pessoal", "business": "WhatsApp comercial"}
 
 
-def _descricao_do_filtro(f: Filtros) -> str:
+def _descricao_do_filtro(f: Filtros, publico: str = "dono") -> str:
     """O filtro em palavras, para a capa do PDF: "Com WhatsApp confirmado · MG · busca “solar”"."""
     partes = []
     tipos = [t for t in (f.em.get("tipo_whatsapp") or []) if t in _TIPOS_WHATSAPP]
@@ -1018,8 +1552,11 @@ def _descricao_do_filtro(f: Filtros) -> str:
         valores = f.em.get(campo) or []
         if valores:
             partes.append(", ".join(v.title() if campo in ("cidade", "bairro") else v for v in valores[:3]) + (" e outros" if len(valores) > 3 else ""))
-    if f.aptidao_min:
-        partes.append(f"Potencial a partir de {f.aptidao_min}")
+    nota = max(f.aptidao_min or 0, f.encaixe_min or 0)
+    if nota:
+        partes.append(f"{'Potencial' if publico == 'dono' else 'Encaixe'} a partir de {nota}")
+    if f.ia_min:
+        partes.append(f"Nota da IA a partir de {f.ia_min}")
     if f.com_email:
         partes.append("Com e-mail")
     if f.pasta == "fora":
@@ -1052,9 +1589,12 @@ def pdf_da_lista(id_: str, f: Annotated[Filtros, Depends()], request: Request) -
         nome, regiao = " · ".join(p.title() for p in meta["palavras"]), meta["uf"] or "Brasil"
     else:
         nome, regiao = relatorio.titulo(meta["cidade"]), meta["uf"]
-    pdf = relatorio.gerar_pdf(linhas, nome=nome, regiao=regiao, publico=_publico(meta), filtro=_descricao_do_filtro(f))
+    pdf = relatorio.gerar_pdf(
+        linhas, nome=nome, regiao=regiao, publico=_publico(meta), filtro=_descricao_do_filtro(f, _publico(meta)),
+        perfil=perfis.do_meta(meta)["nome"],
+    )
     pastas.registrar_exportacao("lista", id_, f"PDF da lista de {_rotulo(meta)}", len(linhas), _ip(request))
-    return _resposta_pdf(pdf, f"solar-leads-{pipeline.slug(meta['cidade'])[:40]}-{meta['uf'].lower() or 'br'}-{datetime.now():%Y%m%d-%H%M}.pdf")
+    return _resposta_pdf(pdf, f"garimpo-{pipeline.slug(meta['cidade'])[:40]}-{meta['uf'].lower() or 'br'}-{datetime.now():%Y%m%d-%H%M}.pdf")
 
 
 @app.get("/api/pastas/{pasta_id}/pdf")
@@ -1073,7 +1613,7 @@ def pdf_da_pasta(pasta_id: int, request: Request) -> Response:
     publico = "empresa" if all(l.get("publico") == "empresa" for l in linhas) else "dono"
     pdf = relatorio.gerar_pdf(linhas, nome=pasta["nome"], publico=publico, origem="Pasta de contatos")
     pastas.registrar_exportacao("pasta", str(pasta_id), f"PDF da pasta {pasta['nome']}", len(linhas), _ip(request))
-    return _resposta_pdf(pdf, f"solar-leads-pasta-{pipeline.slug(pasta['nome'])}-{datetime.now():%Y%m%d-%H%M}.pdf")
+    return _resposta_pdf(pdf, f"garimpo-pasta-{pipeline.slug(pasta['nome'])}-{datetime.now():%Y%m%d-%H%M}.pdf")
 
 
 # ---------- pastas ----------
@@ -1291,7 +1831,7 @@ def exportar_pasta(pasta_id: int, request: Request) -> StreamingResponse:
     for l in linhas:
         l["tags"] = ",".join(t for t in (l.get("tags") or "", marca) if t)
         saida.append([l.get(c, "") for c in chaves])
-    return _csv(saida, f"solar-leads-pasta-{pipeline.slug(pasta['nome'])}-{datetime.now():%Y%m%d-%H%M}.csv", publico)
+    return _csv(saida, f"garimpo-pasta-{pipeline.slug(pasta['nome'])}-{datetime.now():%Y%m%d-%H%M}.csv", publico)
 
 
 # ---------- não contatar ----------
@@ -1426,7 +1966,7 @@ def inicio_da_api(request: Request) -> dict:
     registro = getattr(request.state, "chave", None)
     return {
         "ok": True,
-        "sistema": "Solar Leads",
+        "sistema": "Garimpo",
         "versao": "v1",
         "chave": registro["nome"] if registro else None,
         "limite_por_minuto": API_POR_MINUTO,
@@ -1441,8 +1981,11 @@ _ROTAS_V1 = [
     ("GET", "/atividades", atividades, "Busca de atividade econômica (q=)"),
     ("GET", "/campos", campos, "Campos que cada contato traz"),
     ("GET", "/publico", previa_do_publico, "Quantas empresas têm certas palavras no nome (palavra=, uf=)"),
+    ("GET", "/perfis", listar_perfis, "Perfis de busca: os prontos (energia solar, sem perfil) e os salvos"),
+    ("GET", "/ia", uso_da_ia, "Gasto de IA do mês, teto e modelos"),
+    ("GET", "/perfis/{perfil_id}", um_perfil, "Um perfil de busca, com atividades, filtros e critério"),
     ("GET", "/listas", listar, "Todas as listas"),
-    ("POST", "/listas", criar_lista, "Gera uma lista (cidade + uf, ou palavras); acompanhe o status em /listas/{id}"),
+    ("POST", "/listas", criar_lista, "Gera uma lista (cidade + uf, ou palavras; perfil= opcional); acompanhe o status em /listas/{id}"),
     ("GET", "/listas/{id_}", uma_lista, "Uma lista: status, etapa e resumo"),
     ("GET", "/listas/{id_}/filtros", opcoes_de_filtro, "Opções de cada filtro da lista, com contagem"),
     ("GET", "/listas/{id_}/contatos", contatos, "Contatos da lista, com filtros e paginação (até 500 por página)"),

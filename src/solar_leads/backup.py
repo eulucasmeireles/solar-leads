@@ -31,7 +31,7 @@ MANTER = 14
 PREFIXO = "solar-leads-"
 _RAIZ_NO_ARQUIVO = "solar-leads-backup"
 
-LEIA_ME = """# Cópias de segurança do Solar Leads
+LEIA_ME = """# Cópias de segurança do Garimpo (antes Solar Leads)
 
 Cada arquivo `solar-leads-AAAAMMDD-HHMMSS.tar.gz.gpg` é uma cópia criptografada dos dados do
 sistema (pastas, WhatsApp verificados, descrição das listas e configurações). Ficam as 14 mais recentes.

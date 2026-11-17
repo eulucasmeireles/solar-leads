@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import csv
 import re
+import shutil
 from functools import lru_cache
 import tempfile
 from pathlib import Path
 
 import duckdb
 
-from . import enriquecer
+from . import enriquecer, qualificacao
 
 # chave, cabeçalho no CSV (os em inglês são os que o GHL reconhece sozinho), rótulo na tela, grupo, tipo
 CAMPOS: list[tuple[str, str, str, str, str]] = [
@@ -66,6 +67,10 @@ CAMPOS: list[tuple[str, str, str, str, str]] = [
     ("solar_kw", "Solar kW", "Potência instalada (kW)", "Energia solar", "numero"),
     ("solar_sistemas", "Sistemas solares", "Sistemas registrados", "Energia solar", "numero"),
     ("solar_onde", "Onde fica o sistema", "Onde fica o sistema", "Energia solar", "texto"),
+    ("nota_ia", "Nota da IA", "Nota da IA (0 a 10)", "Qualificação", "numero"),
+    ("motivo_ia", "Motivo da IA", "Por que essa nota da IA", "Qualificação", "texto"),
+    ("encaixe", "Encaixe no perfil", "Encaixe no perfil (0 a 10)", "Qualificação", "numero"),
+    ("motivos_encaixe", "Motivos do encaixe", "Por que esse encaixe", "Qualificação", "lista"),
     ("oportunidade", "Oportunidade", "Onde está a oportunidade", "Qualificação", "texto"),
     ("aptidao_solar", "Aptidao solar", "Potencial geral (0 a 10)", "Qualificação", "numero"),
     ("potencial_casa", "Potencial da casa", "Potencial da casa do dono (0 a 10)", "Qualificação", "numero"),
@@ -81,8 +86,10 @@ CAMPOS: list[tuple[str, str, str, str, str]] = [
 CHAVES = [c[0] for c in CAMPOS]
 CABECALHOS = [c[1] for c in CAMPOS]
 # Colunas guardadas além das exibidas (controle interno).
-INTERNAS = ["dono_chave", "ordem"]
-INTEIRAS = ("ordem", "aptidao_solar", "chance_dono", "potencial_casa", "potencial_empresa")
+INTERNAS = ["dono_chave", "ordem", "cnae"]
+INTEIRAS = ("ordem", "aptidao_solar", "chance_dono", "potencial_casa", "potencial_empresa", "encaixe", "nota_ia")
+# Versão do formato das listas gravadas. 2: encaixe no perfil, nota da IA e código da atividade.
+VERSAO = 2
 
 PORTE = {"01": "Microempresa", "03": "Pequeno porte", "05": "Médio ou grande"}
 
@@ -95,12 +102,56 @@ SO_DO_DONO = frozenset(
 ) | {"oportunidade", "aptidao_solar", "potencial_casa", "motivos_casa", "potencial_empresa", "motivos_solar"}
 
 
+# No público "dono" (energia solar) o encaixe é a própria nota solar: não aparece duas vezes.
+SO_FORA_DO_SOLAR = frozenset({"encaixe", "motivos_encaixe"})
+
+
+def _mostra(chave: str, publico: str) -> bool:
+    return chave not in (SO_DO_DONO if publico == "empresa" else SO_FORA_DO_SOLAR)
+
+
 def chaves_do_publico(publico: str) -> list[str]:
-    return [c for c in CHAVES if publico != "empresa" or c not in SO_DO_DONO]
+    return [c for c in CHAVES if _mostra(c, publico)]
 
 
 def cabecalhos_do_publico(publico: str) -> list[str]:
-    return [cab for c, cab, *_ in CAMPOS if publico != "empresa" or c not in SO_DO_DONO]
+    return [cab for c, cab, *_ in CAMPOS if _mostra(c, publico)]
+
+
+def pontuar_encaixe(linhas: list[dict], publico: str, pesos: dict[str, int] | None = None) -> None:
+    """Preenche `encaixe`: a nota solar no público "dono"; nos outros, o encaixe no perfil."""
+    for l in linhas:
+        if publico == "dono":
+            l["encaixe"], l["motivos_encaixe"] = int(l.get("aptidao_solar") or 0), l.get("motivos_solar") or ""
+        else:
+            nota, motivos = qualificacao.encaixe(l, pesos)
+            l["encaixe"], l["motivos_encaixe"] = nota, "; ".join(motivos)
+
+
+def passa_nos_filtros(linha: dict, filtros: dict | None) -> bool:
+    """Filtros do perfil que a base aplica depois de carregar: anos mínimos de empresa e porte."""
+    if not filtros:
+        return True
+    idade_min = int(filtros.get("idade_min") or 0)
+    if idade_min:
+        try:
+            if float(linha.get("idade_empresa") or -1) < idade_min:
+                return False
+        except (TypeError, ValueError):
+            return False
+    portes = filtros.get("portes") or []
+    if portes:
+        porte = str(linha.get("porte") or "").strip()
+        if porte.zfill(2) not in portes and porte not in {PORTE[p] for p in portes if p in PORTE}:
+            return False
+    return True
+
+
+def aplicar_notas_da_ia(linhas: list[dict], notas: dict[str, tuple[int, str]] | None) -> None:
+    """Grava em cada linha a nota da IA da empresa dela (as notas são por CNPJ)."""
+    for l in linhas:
+        nota = (notas or {}).get(l.get("cnpj") or "")
+        l["nota_ia"], l["motivo_ia"] = (nota[0], nota[1]) if nota else (None, "")
 
 
 @lru_cache(maxsize=4096)
@@ -130,8 +181,14 @@ def montar(
     so_pessoal: bool = False,
     min_aptidao: int = 0,
     publico: str = "dono",
+    pesos: dict[str, int] | None = None,
+    filtros: dict | None = None,
+    notas: dict[str, tuple[int, str]] | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    """Devolve (todas as linhas, em ordem de prioridade; as linhas para disparo, sem repetidos)."""
+    """Devolve (todas as linhas, em ordem de prioridade; as linhas para disparo, sem repetidos).
+
+    `pesos` e `filtros` vêm do perfil da lista; `notas`, das avaliações da IA já feitas (por CNPJ).
+    """
     linhas = [enriquecer.escolher_telefone(l, tem_whatsapp, so_pessoal) for l in leads]
     linhas = [l for l in linhas if l["aptidao_solar"] >= min_aptidao]
     # Se alguma empresa da pessoa já tem solar, as outras linhas dela passam a dizer isso:
@@ -144,6 +201,9 @@ def montar(
             l["solar"] = "outra empresa do dono tem"
     for l in linhas:
         l["porte"] = PORTE.get((l["porte"] or "").strip().zfill(2), "") if l["porte"] else ""
+    linhas = [l for l in linhas if passa_nos_filtros(l, filtros)]
+    pontuar_encaixe(linhas, publico, pesos)
+    aplicar_notas_da_ia(linhas, notas)
     ordenar(linhas, cidade, publico)
     disparo = sem_repetidos([l for l in linhas if l["faixa"] in ("A", "B") and l["telefone"]])
     return linhas, disparo
@@ -153,8 +213,8 @@ def ordenar(linhas: list[dict], cidade: str, publico: str = "dono") -> None:
     """Põe as linhas em ordem de prioridade e refaz as etiquetas, conforme o público da lista.
 
     Nos dois públicos vem primeiro quem tem WhatsApp confirmado (sem WhatsApp não há contato) e,
-    dentro de cada faixa, quem está no Maps e o CNPJ ativo. No público "dono" o desempate seguinte
-    é o potencial solar; no público "empresa" ele não entra, e as etiquetas não falam de solar.
+    dentro de cada faixa, quem está no Maps e o CNPJ ativo. O desempate seguinte é o encaixe no
+    perfil (no público "dono", a própria nota solar); no público "empresa" as etiquetas não falam de solar.
     """
     if publico not in PUBLICOS:
         raise ValueError(f"Público desconhecido: {publico}")
@@ -172,7 +232,7 @@ def ordenar(linhas: list[dict], cidade: str, publico: str = "dono") -> None:
             "ABC".index(l["faixa"]),
             l["fonte"] != "Google Maps",
             l["situacao"] not in ("ativa", ""),
-            -int(l["aptidao_solar"] or 0) if dono else 0,
+            -int((l["aptidao_solar"] if dono else l.get("encaixe")) or 0),
             -int(l["chance_dono"] or 0),
             l["cnpj"],
         )
@@ -181,13 +241,51 @@ def ordenar(linhas: list[dict], cidade: str, publico: str = "dono") -> None:
         l["ordem"] = i
 
 
-def trocar_publico(arquivo: Path | str, cidade: str, publico: str) -> None:
-    """Reordena e reetiqueta uma lista já gravada. Não mexe em telefones nem em notas."""
-    cur = duckdb.connect().execute(f"SELECT * FROM read_parquet('{arquivo}')")
+def ler_parquet(arquivo: Path | str) -> list[dict]:
+    cur = duckdb.connect().execute(f"SELECT * FROM read_parquet('{arquivo}') ORDER BY ordem")
     nomes = [d[0] for d in cur.description]
-    linhas = [dict(zip(nomes, l)) for l in cur.fetchall()]
+    return [dict(zip(nomes, l)) for l in cur.fetchall()]
+
+
+def trocar_publico(arquivo: Path | str, cidade: str, publico: str, pesos: dict[str, int] | None = None) -> None:
+    """Reordena e reetiqueta uma lista já gravada. Não mexe em telefones; refaz só o encaixe."""
+    linhas = ler_parquet(arquivo)
+    pontuar_encaixe(linhas, publico, pesos)
     ordenar(linhas, cidade, publico)
     salvar_parquet(linhas, arquivo)
+
+
+def trocar_notas_da_ia(arquivo: Path | str, notas: dict[str, tuple[int, str]]) -> None:
+    """Grava as notas da IA numa lista pronta, sem mudar a ordem."""
+    arquivo = Path(arquivo)
+    linhas = ler_parquet(arquivo)
+    aplicar_notas_da_ia(linhas, notas)
+    provisorio = arquivo.with_suffix(".notas.parquet")
+    salvar_parquet(linhas, provisorio)
+    provisorio.replace(arquivo)  # quem estiver lendo a lista não pega o arquivo pela metade
+
+
+def migrar(arquivo: Path | str, publico: str, pesos: dict[str, int] | None = None) -> bool:
+    """Leva uma lista gravada antes dos perfis ao formato atual, sem mudar a ordem.
+
+    Guarda antes uma cópia em `antes-garimpo/`, ao lado da lista. Devolve se mudou algo.
+    """
+    arquivo = Path(arquivo)
+    colunas = {d[0] for d in duckdb.connect().execute(f"SELECT * FROM read_parquet('{arquivo}') LIMIT 0").description}
+    if set(CHAVES + INTERNAS) <= colunas:
+        return False
+    copia = arquivo.parent / "antes-garimpo" / arquivo.name
+    copia.parent.mkdir(exist_ok=True)
+    if not copia.exists():
+        shutil.copy2(arquivo, copia)
+    linhas = ler_parquet(arquivo)
+    pontuar_encaixe(linhas, publico, pesos)
+    for l in linhas:
+        l.setdefault("nota_ia", None)
+        l.setdefault("motivo_ia", "")
+        l.setdefault("cnae", "")
+    salvar_parquet(linhas, arquivo)
+    return True
 
 
 def _contar(conjunto: list[dict], campo: str) -> dict[str, int]:

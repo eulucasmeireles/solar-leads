@@ -11,9 +11,9 @@ from typing import Annotated, Optional
 
 import typer
 
-from . import aneel, backup, cnpj_db, config, enriquecer, gmaps, pipeline, whatsapp
+from . import aneel, backup, cnpj_db, config, consulta, enriquecer, gmaps, pipeline, whatsapp
 
-app = typer.Typer(no_args_is_help=True, help="Listas de leads de energia solar por região.")
+app = typer.Typer(no_args_is_help=True, help="Garimpo: listas de leads por cidade, para qualquer nicho (energia solar incluída).")
 base_app = typer.Typer(no_args_is_help=True, help="Base de CNPJ da Receita.")
 aneel_app = typer.Typer(no_args_is_help=True, help="Registro da ANEEL de quem já tem energia solar.")
 app.add_typer(aneel_app, name="aneel")
@@ -242,6 +242,53 @@ def senha() -> None:
     env.write_text("\n".join(linhas) + "\n")
     env.chmod(0o600)
     typer.echo("Senha trocada. Reinicie o serviço: systemctl --user restart solar-leads-web")
+
+
+SEGREDOS = ("ANTHROPIC_API_KEY", "APIFY_TOKEN", "CHECKLEAKED_KEY", "CHECKNUMBER_KEY")
+
+
+@app.command()
+def segredo(nome: Annotated[str, typer.Argument(help=f"Qual chave guardar: {', '.join(SEGREDOS)}")]) -> None:
+    """Guarda no .env uma chave de serviço externo, digitada sem aparecer na tela."""
+    if nome not in SEGREDOS:
+        raise typer.Exit(f"Nome desconhecido. Opções: {', '.join(SEGREDOS)}.")
+    valor = typer.prompt(f"Cole a chave ({nome})", hide_input=True).strip()
+    if len(valor) < 20 or any(c.isspace() for c in valor):
+        raise typer.Exit("Isso não parece uma chave (curta demais ou com espaços). Nada foi gravado.")
+    env = config.RAIZ / ".env"
+    linhas = [l for l in env.read_text().splitlines() if not l.startswith(f"{nome}=")] if env.exists() else []
+    linhas.append(f"{nome}={valor}")
+    env.write_text("\n".join(linhas) + "\n")
+    env.chmod(0o600)
+    typer.echo(f"{nome} guardada no .env ({len(valor)} caracteres).")
+
+
+@wa_app.command("testar-servico")
+def wa_testar_servico(
+    servico: Annotated[str, typer.Argument(help=f"Qual serviço testar: {', '.join(consulta.SERVICOS)}")],
+    pessoais: Annotated[int, typer.Option(help="Quantos números com WhatsApp pessoal entram no teste")] = 110,
+    comerciais: Annotated[int, typer.Option(help="Quantos números com WhatsApp comercial entram no teste")] = 40,
+    sem: Annotated[int, typer.Option(help="Quantos números sem WhatsApp entram no teste")] = 50,
+    teto: Annotated[float, typer.Option(help="Máximo, em dólares, que a Apify pode cobrar por execução (0 = sem teto)")] = 0.0,
+) -> None:
+    """Mede o acerto de um serviço pago de consulta, contra números que já verificamos."""
+    try:
+        r = consulta.testar(servico, consulta.amostra_conhecida(pessoais, comerciais, sem), teto_usd=teto or None)
+    except consulta.ServicoIndisponivel as e:
+        raise typer.Exit(str(e)) from e
+    saida = config.DADOS / f"teste-servico-{servico}.json"
+    saida.write_text(json.dumps(r, ensure_ascii=False, indent=1))
+    typer.echo(f"{r['servico']}: {r['acertos']} acertos em {r['total'] - r['sem_resposta']} respostas ({r['acerto_pct']}%)")
+    typer.echo(f"  sem resposta: {r['sem_resposta']} | disse que tem e não tem: {r['disse_tem_e_nao_tem']} | disse que não tem e tem: {r['disse_nao_tem_e_tem']}")
+    if c := r.get("comercial"):
+        typer.echo(
+            f"  pessoal ou comercial: {c['acertos']} acertos em {c['com_whatsapp'] - c['sem_tipo']} ({c['acerto_pct']}%)"
+            f" | sem tipo: {c['sem_tipo']} | disse comercial e é pessoal: {c['disse_comercial_e_e_pessoal']}"
+            f" | disse pessoal e é comercial: {c['disse_pessoal_e_e_comercial']}"
+        )
+    if t := r.get("tarefa"):
+        typer.echo(f"  tarefa {t.get('task_id')}: {t.get('success')} respondidos, {t.get('failure')} falhas | cobrado: {t.get('actual_amount') or t.get('estimated_amount')}")
+    typer.echo(f"  tempo: {r['segundos']} s | custo estimado: US$ {r['custo_usd']} | resultado em {saida}")
 
 
 @backup_app.command("agora")

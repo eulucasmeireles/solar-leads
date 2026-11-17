@@ -505,6 +505,7 @@ def enriquecer(
     so_locais: bool = True,
     palavras: list[str] | None = None,
     progresso=None,
+    solar: bool = True,
 ) -> list[dict]:
     """Leads dos lugares do Maps e, com `cnaes`, também de todo estabelecimento do
     município com essa atividade na Receita (ativo ou não) que o Maps não trouxe.
@@ -513,6 +514,8 @@ def enriquecer(
     (ou do país, com `uf` vazia) que têm uma das palavras no nome, e cada linha leva a
     cidade e o estado da própria empresa. "Só locais" passa a valer por estado: sede da
     empresa dentro do recorte e telefone com DDD do estado dela.
+
+    `solar=False` (listas de outros nichos) pula a consulta à ANEEL: as colunas de solar ficam vazias.
     """
     etapa = progresso or (lambda texto: None)
     amplo = bool(palavras)
@@ -584,16 +587,19 @@ def enriquecer(
                 }
             )
 
-    etapa("Conferindo quem já tem energia solar")
     freq = _frequencias(con, todos)
-    solar_pj, solar_grupo, solar_pf = aneel.consultar(
-        con,
-        sorted({p["est"]["cnpj"] for p in pre if p["est"]}),
-        # O CPF mascarado só se compara dentro de um município; numa lista de vários, fica de fora.
-        [] if amplo else sorted({c for p in pre if (c := _cpf6(p["dono"], p["est"]))}),
-        cidade,
-        uf,
-    )
+    if solar:
+        etapa("Conferindo quem já tem energia solar")
+        solar_pj, solar_grupo, solar_pf = aneel.consultar(
+            con,
+            sorted({p["est"]["cnpj"] for p in pre if p["est"]}),
+            # O CPF mascarado só se compara dentro de um município; numa lista de vários, fica de fora.
+            [] if amplo else sorted({c for p in pre if (c := _cpf6(p["dono"], p["est"]))}),
+            cidade,
+            uf,
+        )
+    else:
+        solar_pj = solar_grupo = solar_pf = None
     aneel_ok = solar_pj is not None
     solar_pj, solar_grupo, solar_pf = solar_pj or {}, solar_grupo or {}, solar_pf or {}
     # Donos que já têm solar em alguma empresa desta lista: as outras empresas deles herdam a informação,
@@ -605,7 +611,7 @@ def enriquecer(
         and (p["est"]["cnpj"] in solar_pj or p["est"]["cnpj_basico"] in solar_grupo)
     }
     regioes: set[str] = set()
-    if not amplo:  # "região com muita energia solar" é uma medida de bairros de uma cidade
+    if solar and not amplo:  # "região com muita energia solar" é uma medida de bairros de uma cidade
         por_cep = dict(
             con.execute("SELECT substr(cep, 1, 5), count(*) FROM estab_mun WHERE situacao = '02' AND length(cep) = 8 GROUP BY 1").fetchall()
         )

@@ -1,5 +1,5 @@
 'use strict';
-/* Solar Leads - gráficos leves em HTML/SVG (sem biblioteca): anéis, barras e colunas arredondadas */
+/* Garimpo - gráficos leves em HTML/SVG (sem biblioteca): anéis, barras e colunas arredondadas */
 
 const ROTULOS_WHATS = { pessoal: 'WhatsApp pessoal', business: 'WhatsApp comercial', 'não verificado': 'Não verificado', '': 'Não verificado' };
 const ROTULO_SOLAR = {
@@ -79,6 +79,10 @@ function montarPainel(p, empresa) {
     const f = (p.aptidao || []).find((d) => Number(d.valor) === i);
     return { valor: i, n: f ? f.n : 0 };
   });
+  const notaIa = Array.from({ length: 11 }, (_, i) => {
+    const f = (p.nota_ia || []).find((d) => Number(d.valor) === i);
+    return { valor: i, n: f ? f.n : 0 };
+  });
   const comAnos = (p.solar_por_ano || []).filter((d) => d.n > 0);
   const totalAnos = comAnos.reduce((t, d) => t + d.n, 0);
   const solarOrdem = ['sem registro', 'dono: indício fraco', 'empresa já tem', 'outra unidade da empresa tem', 'outra empresa do dono tem'];
@@ -94,7 +98,8 @@ function montarPainel(p, empresa) {
     cartaoGrafico('Atividades mais comuns', 'as 10 principais', barras({ dados: p.atividades, rotulo: (d) => d.valor || 'Não informada' })),
     cartaoGrafico('Bairros com mais contatos', 'os 10 principais', barras({ dados: p.bairros, rotulo: (d) => d.valor || 'Não informado' })),
     cartaoGrafico('Idade do dono', null, colunas({ dados: (p.idade || []).map((d) => ({ ...d, valor: String(d.valor) })), rotulo: (d) => d.valor || '—', cor: '--acento', legenda: 'Contatos por faixa de idade do dono' })),
-    so(cartaoGrafico('Nota de potencial', 'de 0 a 10', colunas({ dados: aptidao, rotulo: (d) => String(d.valor), cor: '--acento', legenda: 'Contatos por nota de potencial' }))),
+    cartaoGrafico(empresa ? 'Encaixe no perfil' : 'Nota de potencial', 'de 0 a 10', colunas({ dados: aptidao, rotulo: (d) => String(d.valor), cor: '--acento', legenda: empresa ? 'Contatos por encaixe no perfil' : 'Contatos por nota de potencial' })),
+    notaIa.some((d) => d.n) ? cartaoGrafico('Nota da IA', 'de 0 a 10', colunas({ dados: notaIa, rotulo: (d) => String(d.valor), cor: '--roxo', legenda: 'Contatos por nota da IA' })) : null,
     so(cartaoGrafico('Empresas que instalaram solar', totalAnos ? `${num(totalAnos)} empresas` : null, colunas({ dados: comAnos, rotulo: (d) => String(d.valor), cor: '--laranja', legenda: 'Empresas que instalaram energia solar por ano' }))));
   /* preenche com animação ao aparecer */
   requestAnimationFrame(() => requestAnimationFrame(() => raiz.classList.add('pronto')));

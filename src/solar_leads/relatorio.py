@@ -32,6 +32,7 @@ VERDE, VERDE_BG = HexColor("#1E8E3E"), HexColor("#E6F4EA")
 AZUL, AZUL_BG, AZUL_FG = HexColor("#0071E3"), HexColor("#E5F0FF"), HexColor("#0A5FCC")
 LARANJA, LARANJA_BG, LARANJA_FG = HexColor("#E8870E"), HexColor("#FFF1DC"), HexColor("#B25E00")
 CINZA_BG, BARRA, SOL = HexColor("#F0F0F2"), HexColor("#9DBBE0"), HexColor("#F5A623")
+ROXO = HexColor("#8944AB")
 # Fundo e letra das iniciais, como os círculos da página.
 AVATARES = [
     ("#E5F0FF", "#0A5FCC"), ("#FCE4EC", "#B0224F"), ("#E0F2F1", "#0B7A70"),
@@ -181,7 +182,7 @@ def _rodape(c: Canvas, nome: str, pagina: int, paginas: int) -> None:
     c.setLineWidth(0.6)
     c.line(MARGEM, 36, L - MARGEM, 36)
     _sol(c, MARGEM + 5, 23.5, 2.6)
-    _texto(c, MARGEM + 15, 21, _cabe(f"Solar Leads  ·  {nome}", REGULAR, 7.5, 380), REGULAR, 7.5, TXT3)
+    _texto(c, MARGEM + 15, 21, _cabe(f"Garimpo  ·  {nome}", REGULAR, 7.5, 380), REGULAR, 7.5, TXT3)
     _texto_dir(c, L - MARGEM, 21, f"Página {pagina} de {paginas}", REGULAR, 7.5, TXT3)
 
 
@@ -226,7 +227,7 @@ def _faixa(c: Canvas, x: float, y: float, largura: float, nome: str, partes: lis
         lx += _texto(c, lx, y - 39.5, num(n), MEDIO, 8.2, TXT) + 16
 
 
-def _capa(c: Canvas, linhas: list[dict], nome: str, regiao: str, publico: str, filtro: str, origem: str, paginas: int) -> None:
+def _capa(c: Canvas, linhas: list[dict], nome: str, regiao: str, publico: str, filtro: str, origem: str, paginas: int, perfil: str = "") -> None:
     # Brilho suave no topo, como o da tela inicial.
     c.saveState()
     for cx, cy, raio, cor in ((150, A + 40, 330, HexColor("#FFE9B8")), (500, A + 70, 260, HexColor("#E2DBFF"))):
@@ -238,7 +239,7 @@ def _capa(c: Canvas, linhas: list[dict], nome: str, regiao: str, publico: str, f
 
     agora = datetime.now()
     _sol(c, MARGEM + 6, A - 49)
-    _texto(c, MARGEM + 19, A - 52.5, "Solar Leads", FORTE, 10.5, TXT)
+    _texto(c, MARGEM + 19, A - 52.5, "Garimpo", FORTE, 10.5, TXT)
     _texto_dir(c, L - MARGEM, A - 52.5, f"{agora.day} de {MESES[agora.month - 1]} de {agora.year}", REGULAR, 9, TXT2)
 
     y = A - 150
@@ -250,7 +251,7 @@ def _capa(c: Canvas, linhas: list[dict], nome: str, regiao: str, publico: str, f
     fim = MARGEM + _texto(c, MARGEM, y, nome_cabe, FORTE, tamanho, TXT, aperto=tamanho * 0.022)
     if regiao:
         _texto(c, fim + 9, y, regiao, MEDIO, tamanho * 0.55, TXT3)
-    publico_txt = "Público: empresas" if publico == "empresa" else "Público: donos (energia solar)"
+    publico_txt = f"Perfil: {perfil}" if perfil else ("Público: empresas" if publico == "empresa" else "Público: donos (energia solar)")
     _texto(c, MARGEM, y - 22, publico_txt + (f"  ·  {filtro}" if filtro else ""), REGULAR, 10, TXT2)
 
     # Os números grandes.
@@ -305,6 +306,10 @@ def _capa(c: Canvas, linhas: list[dict], nome: str, regiao: str, publico: str, f
     ]
     if publico != "empresa":
         itens_ler.append(("Potencial da casa e da empresa", "nota de 0 a 10 para instalar energia solar em cada lugar."))
+    elif any(l.get("nota_ia") not in (None, "") for l in linhas):
+        itens_ler.append(("Nota da IA", "nota de 0 a 10 que a IA deu a cada empresa, pelo critério do perfil."))
+    else:
+        itens_ler.append(("Encaixe no perfil", "nota de 0 a 10: atividade, anos de empresa, porte e capital."))
     itens_ler.append(("Telefone", "toque no número para abrir a conversa no WhatsApp."))
     altura = 34 + len(itens_ler) * 16
     base = 58
@@ -383,11 +388,14 @@ def _cartao(c: Canvas, x: float, topo: float, l: dict, indice: int, publico: str
     cy = topo - 33
     _anel(c, centros[0], cy, chance / 100, f"{chance}%", VERDE, ("chance de", "ser o dono"))
     if publico == "empresa":
-        anos, socios = _inteiro(l.get("idade_empresa")), _inteiro(l.get("numero_socios"))
+        # No meio, a nota da IA quando houver; senão, o encaixe no perfil. À direita, os anos de empresa.
+        anos, ia, encaixe = _inteiro(l.get("idade_empresa")), _inteiro(l.get("nota_ia")), _inteiro(l.get("encaixe"))
+        if ia is not None:
+            _anel(c, centros[1], cy, ia / 10, str(ia), ROXO, ("nota", "da IA"))
+        elif encaixe is not None:
+            _anel(c, centros[1], cy, encaixe / 10, str(encaixe), AZUL, ("encaixe", "no perfil"))
         if anos is not None:
-            _quadro(c, centros[1], cy, num(anos), ("ano de" if anos == 1 else "anos de", "empresa"))
-        if socios:
-            _quadro(c, centros[2], cy, num(socios), ("sócio" if socios == 1 else "sócios", ""))
+            _quadro(c, centros[2], cy, num(anos), ("ano de" if anos == 1 else "anos de", "empresa"))
     else:
         casa, emp = _inteiro(l.get("potencial_casa")), _inteiro(l.get("potencial_empresa"))
         if casa is not None:
@@ -399,7 +407,10 @@ def _cartao(c: Canvas, x: float, topo: float, l: dict, indice: int, publico: str
 
 # ---------- o arquivo ----------
 
-def gerar_pdf(linhas: list[dict], *, nome: str, regiao: str = "", publico: str = "dono", filtro: str = "", origem: str = "Lista de contatos") -> bytes:
+def gerar_pdf(
+    linhas: list[dict], *, nome: str, regiao: str = "", publico: str = "dono", filtro: str = "", origem: str = "Lista de contatos",
+    perfil: str = "",
+) -> bytes:
     """O PDF completo, em bytes. `nome` é o título da capa ("Montes Claros", "Fotovolt · Solar", nome da pasta)."""
     if len(linhas) > MAX_CONTATOS:
         raise ValueError(
@@ -409,11 +420,11 @@ def gerar_pdf(linhas: list[dict], *, nome: str, regiao: str = "", publico: str =
     saida = io.BytesIO()
     c = Canvas(saida, pagesize=A4, pageCompression=1)
     completo = nome + (f" — {regiao}" if regiao else "")
-    c.setTitle(f"{completo} · Solar Leads")
-    c.setAuthor("Solar Leads")
+    c.setTitle(f"{completo} · Garimpo")
+    c.setAuthor("Garimpo")
     c.setSubject(origem)
     paginas = 1 + math.ceil(len(linhas) / POR_PAGINA)
-    _capa(c, linhas, nome, regiao, publico, filtro, origem, paginas)
+    _capa(c, linhas, nome, regiao, publico, filtro, origem, paginas, perfil)
     c.showPage()
     for inicio in range(0, len(linhas), POR_PAGINA):
         topo = A - 44

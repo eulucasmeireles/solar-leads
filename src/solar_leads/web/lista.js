@@ -1,5 +1,5 @@
 'use strict';
-/* Solar Leads - tela de uma lista (contatos em mestre-detalhe e visão geral) */
+/* Garimpo - tela de uma lista (contatos em mestre-detalhe e visão geral) */
 
 const SOLAR_JA_TEM = ['empresa já tem', 'outra unidade da empresa tem', 'outra empresa do dono tem'];
 const mesmo = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
@@ -29,19 +29,24 @@ const ATALHOS_BASE = [
 /* atalhos de solar somem no público "empresa"; "Melhores contatos" ali não usa potencial nem solar */
 const ATALHOS_SO_DONO = ['casa', 'sem-solar', 'ja-tem'];
 const MELHORES_EMPRESA = {
-  dica: 'CNPJ ativo e contato forte',
-  ativo: (f) => tem(f.situacao, 'ativa') && tem(f.faixa, 'A'),
-  liga: (f) => { if (!tem(f.situacao, 'ativa')) f.situacao.push('ativa'); if (!tem(f.faixa, 'A')) f.faixa.push('A'); },
-  desliga: (f) => { f.situacao = sem(f.situacao, 'ativa'); f.faixa = sem(f.faixa, 'A'); },
+  dica: 'CNPJ ativo, contato forte e encaixe 4 ou mais',
+  ativo: (f) => tem(f.situacao, 'ativa') && tem(f.faixa, 'A') && f.aptidao_min >= 4,
+  liga: (f) => { if (!tem(f.situacao, 'ativa')) f.situacao.push('ativa'); if (!tem(f.faixa, 'A')) f.faixa.push('A'); f.aptidao_min = Math.max(f.aptidao_min, 4); },
+  desliga: (f) => { f.situacao = sem(f.situacao, 'ativa'); f.faixa = sem(f.faixa, 'A'); f.aptidao_min = 0; },
 };
 function atalhosDaLista(meta) {
   if (!publicoEmpresa(meta)) return ATALHOS_BASE.filter((a) => a.id !== 'comercial');
   return ATALHOS_BASE.filter((a) => !ATALHOS_SO_DONO.includes(a.id)).map((a) => (a.id === 'melhores' ? { ...a, ...MELHORES_EMPRESA } : a));
 }
-const ORDENS = [['relevancia', 'Mais relevantes'], ['aptidao', 'Maior potencial'], ['chance', 'Maior chance de ser o dono'], ['nome', 'Nome (A a Z)'], ['empresa', 'Empresa (A a Z)']];
+const ORDENS = [['relevancia', 'Mais relevantes'], ['aptidao', 'Maior potencial'], ['ia', 'Maior nota da IA'], ['chance', 'Maior chance de ser o dono'], ['nome', 'Nome (A a Z)'], ['empresa', 'Empresa (A a Z)']];
+/* ordens que a lista oferece: "potencial" vira "encaixe" fora de energia solar; nota da IA só depois de avaliar */
+function ordensDaLista(meta) {
+  return ORDENS.filter(([v]) => v !== 'ia' || temNotaDaIA(meta)).map(([v, r]) => [v, v === 'aptidao' && publicoEmpresa(meta) ? 'Maior encaixe no perfil' : r]);
+}
+const temNotaDaIA = (meta) => !!(meta && meta.avaliacao && meta.avaliacao.avaliadas);
 const CHAVES_LISTA = ['faixa', 'situacao', 'papel', 'uf', 'cidade', 'bairro', 'atividade', 'tipo_whatsapp', 'solar', 'oportunidade'];
 
-const filtrosPadrao = () => ({ busca: '', faixa: [], situacao: [], solar: [], tipo_whatsapp: [], papel: [], uf: [], cidade: [], bairro: [], atividade: [], oportunidade: [], pasta: '', aptidao_min: 0, com_email: false, so_disparo: true });
+const filtrosPadrao = () => ({ busca: '', faixa: [], situacao: [], solar: [], tipo_whatsapp: [], papel: [], uf: [], cidade: [], bairro: [], atividade: [], oportunidade: [], pasta: '', aptidao_min: 0, ia_min: 0, com_email: false, so_disparo: true });
 const copiaFiltros = (f) => JSON.parse(JSON.stringify(f));
 const igualPadrao = (f) => JSON.stringify(f) === JSON.stringify(filtrosPadrao());
 
@@ -51,11 +56,12 @@ function filtrosDoHash(qs, meta) {
   const f = filtrosPadrao();
   CHAVES_LISTA.forEach((k) => { f[k] = q.getAll(k); });
   const apt = Number(q.get('aptidao_min')); if (apt > 0 && apt <= 10) f.aptidao_min = Math.round(apt);
+  const ia = Number(q.get('ia_min')); if (ia > 0 && ia <= 10) f.ia_min = Math.round(ia);
   f.com_email = q.get('com_email') === '1';
   f.so_disparo = q.get('so_disparo') !== '0';
   f.busca = q.get('busca') || '';
   f.pasta = q.get('pasta') || '';
-  const ordem = limparOcultosDoPublico(meta, f, ORDENS.some(([v]) => v === q.get('ordem')) ? q.get('ordem') : 'relevancia');
+  const ordem = limparOcultosDoPublico(meta, f, ordensDaLista(meta).some(([v]) => v === q.get('ordem')) ? q.get('ordem') : 'relevancia');
   return { f, ordem };
 }
 function queryDoHash(f, ordem) {
@@ -70,6 +76,7 @@ function queryDosFiltros(f, extras = {}) {
   const q = new URLSearchParams();
   CHAVES_LISTA.forEach((k) => f[k].forEach((v) => q.append(k, v)));
   if (f.aptidao_min > 0) q.set('aptidao_min', String(f.aptidao_min));
+  if (f.ia_min > 0) q.set('ia_min', String(f.ia_min));
   if (f.com_email) q.set('com_email', '1');
   q.set('so_disparo', f.so_disparo ? '1' : '0');
   if (f.busca.trim()) q.set('busca', f.busca.trim());
@@ -94,7 +101,7 @@ const TITULO_FILTRO = { oportunidade: 'Onde está a oportunidade', faixa: 'Forç
 
 /* ---------- entrada ---------- */
 async function telaLista(raiz, id, subaba, qs) {
-  document.title = 'Lista · Solar Leads';
+  document.title = 'Lista · Garimpo';
   const rota = app.rota;
   raiz.append(h('div', { class: 'lista-cab', 'aria-busy': 'true' }, esqueleto('260px', '38px'), esqueleto('420px', '16px', 'mt'), esqueleto('100%', '90px', 'mt')));
   let meta;
@@ -105,7 +112,7 @@ async function telaLista(raiz, id, subaba, qs) {
   }
   if (rota !== app.rota) return;
   raiz.replaceChildren();
-  document.title = `${nomeDaLista(meta)} · Solar Leads`;
+  document.title = `${nomeDaLista(meta)} · Garimpo`;
   if (EM_ANDAMENTO(meta)) return viewGerando(raiz, meta, qs);
   if (meta.status === 'erro') return viewErro(raiz, meta);
   return montarLista(raiz, meta, subaba === 'painel' ? 'geral' : 'contatos', qs);
@@ -125,7 +132,7 @@ function cabecalhoDaLista(meta, acoes) {
   const r = meta.resumo;
   const partes = [nomeAtividades(meta), `gerada ${dataRelativa(meta.criada_em)}`];
   if (r) partes.push(`${num(r.total_de_empresas)} empresas analisadas`);
-  partes.push(`Público: ${rotuloPublico(meta)}`);
+  partes.push(`Perfil: ${rotuloPublico(meta)}`);
   return h('header', { class: 'lista-cab' },
     h('a', { class: 'link-volta', href: '#/listas' }, icone('esquerda', 16), 'Listas'),
     h('div', { class: 'lista-cab-linha' },
@@ -148,7 +155,7 @@ function viewGerando(raiz, meta, qs) {
       const m = await api(`/api/listas/${encodeURIComponent(meta.id)}`);
       if (!vivo) return;
       falhas = 0;
-      if (!EM_ANDAMENTO(m)) { raiz.replaceChildren(); document.title = `${nomeDaLista(m)} · Solar Leads`; return m.status === 'erro' ? viewErro(raiz, m) : montarLista(raiz, m, 'contatos', qs); }
+      if (!EM_ANDAMENTO(m)) { raiz.replaceChildren(); document.title = `${nomeDaLista(m)} · Garimpo`; return m.status === 'erro' ? viewErro(raiz, m) : montarLista(raiz, m, 'contatos', qs); }
       etapa.textContent = m.etapa || (m.status === 'na_fila' ? 'Aguardando a vez na fila…' : 'Gerando…');
       titulo.textContent = m.status === 'na_fila' ? 'Sua lista está na fila' : 'Montando sua lista';
     } catch (e) {
@@ -179,14 +186,14 @@ function viewErro(raiz, meta) {
 
 /* ---------- lista pronta ---------- */
 const ICONE_GRUPO = { Contato: 'telefone', Empresa: 'predio', Dono: 'pessoa', 'Energia solar': 'sol', 'Qualificação': 'estrela' };
-const OCULTOS_PERFIL = new Set(['chance_dono', 'aptidao_solar', 'potencial_casa', 'potencial_empresa', 'oportunidade']);
+const OCULTOS_PERFIL = new Set(['chance_dono', 'aptidao_solar', 'potencial_casa', 'potencial_empresa', 'oportunidade', 'encaixe', 'nota_ia']);
 const OPORT = { 'Casa e empresa': { ic: 'casapredio', tom: 'verde' }, Casa: { ic: 'casa', tom: 'azul' }, Empresa: { ic: 'predio', tom: 'azul' }, 'Ampliação': { ic: 'raio', tom: 'laranja' }, 'Baixo potencial': { ic: null, tom: 'cinza' } };
 
 async function montarLista(raiz, meta, abaInicial, qs) {
   const inicial = filtrosDoHash(qs, meta);
   const empresa = publicoEmpresa(meta);
   const ATALHOS = atalhosDaLista(meta);
-  const ordens = ORDENS.filter(([v]) => !(empresa && ORDENS_SO_DONO.includes(v)));
+  const ordens = ordensDaLista(meta);
   const L = {
     meta, f: inicial.f, ordem: inicial.ordem, pagina: 1, filtros: null,
     aba: abaInicial, painelVelho: true, pessoal: null, temWhats: false,
@@ -217,16 +224,35 @@ async function montarLista(raiz, meta, abaInicial, qs) {
   });
   raiz.append(cabecalhoDaLista(meta, [btnPasta, btnPdf, btnExportar, menu]));
   if (meta.aviso) raiz.append(h('div', { class: 'nota nota-laranja', role: 'note' }, icone('info', 18), h('span', { text: meta.aviso })));
+  /* a lista está sendo refeita (WhatsApp verificados, notas da IA): segue aberta e recarrega quando terminar */
+  if (meta.atualizando) {
+    const texto = h('span', { text: `${meta.atualizando}…` });
+    raiz.append(h('div', { class: 'nota nota-atualizando', role: 'status' }, h('i', { class: 'giro', 'aria-hidden': 'true' }), texto));
+    let vivo = true, t = null;
+    const vigiar = async () => {
+      try {
+        const m = await api(`/api/listas/${idUrl}`);
+        if (!vivo) return;
+        if (!m.atualizando) { avisar('Lista atualizada.'); rotear(); return; }
+        texto.textContent = `${m.atualizando}…`;
+      } catch (e) { /* tenta de novo */ }
+      if (vivo) t = setTimeout(vigiar, 3000);
+    };
+    t = setTimeout(vigiar, 3000);
+    aoSair(() => { vivo = false; clearTimeout(t); });
+  }
 
   /* --- três números --- */
   const numeros = h('div', { class: 'tres-numeros', role: 'group', 'aria-label': 'Resumo dos contatos' });
   function desenharNumeros() {
     const r = md.S.res && md.S.res.resumo;
     const terceiro = ['Com WhatsApp confirmado', L.pessoal];
-    const itens = [['Contatos', r ? r.contatos : null], ['Contatos fortes', r ? r.faixa_A : null], terceiro];
+    const quarto = ['Com nota da IA', (meta.avaliacao && meta.avaliacao.avaliadas) || 0];
+    const itens = [['Contatos', r ? r.contatos : null], ['Contatos fortes', r ? r.faixa_A : null], terceiro, quarto];
     numeros.replaceChildren(...itens.map(([rot, v]) => h('div', { class: 'numero-g' },
       v == null ? esqueleto('110px', '40px') : h('div', { class: 'numero-g-v', text: num(v) }), h('div', { class: 'numero-g-r', text: rot }),
-      v === 0 && rot === 'Com WhatsApp confirmado' ? h('a', { class: 'link-peq', href: '#/whatsapp' }, 'Verificar números') : null)));
+      rot === 'Com WhatsApp confirmado' ? h('button', { class: 'link-peq link-btn', type: 'button', onclick: () => dialogoVerificar(meta, () => { location.hash = '#/whatsapp'; }) }, 'Verificar WhatsApp') : null,
+      rot === 'Com nota da IA' ? h('button', { class: 'link-peq link-btn', type: 'button', onclick: () => dialogoAvaliar(meta) }, icone('sparkle', 13), v ? 'Avaliar mais' : 'Avaliar com IA') : null)));
     numeros.classList.toggle('atualizando', Boolean(md.S.carregando && r));
   }
   raiz.append(numeros);
@@ -318,21 +344,29 @@ async function montarLista(raiz, meta, abaInicial, qs) {
     const fo = { ...(L.filtros || {}) };
     if (fo.faixa) fo.faixa = fo.faixa.slice().sort((a, b) => String(a.valor).localeCompare(String(b.valor)));
     const pil = (k) => ((fo[k] || []).length ? grupoPilulas(k, fo[k]) : null);
-    const apt = h('input', { type: 'range', min: '0', max: '10', step: '1', value: String(L.f.aptidao_min), id: 'apt-min', 'aria-describedby': 'apt-saida' });
-    const aptSaida = h('output', { id: 'apt-saida', for: 'apt-min' });
-    const atualizarApt = () => { aptSaida.textContent = Number(apt.value) === 0 ? 'Qualquer nota' : `${apt.value} ou mais`; };
-    const aplicaApt = debounce(() => { L.f.aptidao_min = Number(apt.value); mudou(); }, 300);
-    apt.addEventListener('input', () => { atualizarApt(); aplicaApt(); });
-    sincs.push(() => { apt.value = String(L.f.aptidao_min); atualizarApt(); });
+    /* nota mínima: um controle deslizante de 0 a 10 ligado a uma chave dos filtros */
+    function slider(chave, id) {
+      const input = h('input', { type: 'range', min: '0', max: '10', step: '1', value: String(L.f[chave]), id, 'aria-describedby': `${id}-saida` });
+      const saida = h('output', { id: `${id}-saida`, for: id });
+      const atualizar = () => { saida.textContent = Number(input.value) === 0 ? 'Qualquer nota' : `${input.value} ou mais`; };
+      const aplicar = debounce(() => { L.f[chave] = Number(input.value); mudou(); }, 300);
+      input.addEventListener('input', () => { atualizar(); aplicar(); });
+      sincs.push(() => { input.value = String(L.f[chave]); atualizar(); });
+      atualizar();
+      return h('div', { class: 'slider' }, input, saida);
+    }
+    const sliderApt = slider('aptidao_min', 'apt-min');
+    const sliderIa = temNotaDaIA(meta) ? slider('ia_min', 'ia-min') : null;
     const swEmail = interruptor({ rotulo: 'Só com e-mail', checked: L.f.com_email, aoMudar: (v) => { L.f.com_email = v; mudou(); } });
     const swDisp = interruptor({ rotulo: 'Só contatos prontos para disparo', descricao: 'Esconde números que não devem receber mensagem.', checked: L.f.so_disparo, aoMudar: (v) => { L.f.so_disparo = v; mudou(); } });
     sincs.push(() => { swEmail.input.checked = L.f.com_email; swDisp.input.checked = L.f.so_disparo; });
-    atualizarApt();
     const comWhats = (fo.tipo_whatsapp || []).some((o) => o.valor === 'pessoal' || o.valor === 'business');
     corpoFiltros.replaceChildren(
       empresa ? null : pil('oportunidade'), pil('faixa'), grupoPasta(), empresa ? null : pil('solar'), comWhats ? pil('tipo_whatsapp') : null, pil('situacao'), pil('papel'),
       (fo.uf || []).length > 1 ? grupoLista('uf', fo.uf) : null, (fo.cidade || []).length > 1 ? grupoLista('cidade', fo.cidade) : null,
-      empresa ? null : h('fieldset', { class: 'grupo' }, h('legend', { text: 'Potencial mínimo' }), h('div', { class: 'slider' }, apt, aptSaida), h('p', { class: 'dica', text: 'Nota de 0 a 10 do potencial para energia solar.' })),
+      sliderIa ? h('fieldset', { class: 'grupo' }, h('legend', { text: 'Nota mínima da IA' }), sliderIa, h('p', { class: 'dica', text: 'Nota de 0 a 10 que a IA deu a cada empresa, pelo critério do perfil.' })) : null,
+      h('fieldset', { class: 'grupo' }, h('legend', { text: empresa ? 'Encaixe mínimo' : 'Potencial mínimo' }), sliderApt,
+        h('p', { class: 'dica', text: empresa ? 'Nota de 0 a 10 de quanto a empresa se encaixa no perfil: atividade, anos de empresa, porte e capital.' : 'Nota de 0 a 10 do potencial para energia solar.' })),
       (fo.bairro || []).length ? grupoLista('bairro', fo.bairro) : null, (fo.atividade || []).length ? grupoLista('atividade', fo.atividade) : null,
       h('fieldset', { class: 'grupo' }, h('legend', { text: 'Outros' }), h('div', { class: 'grupo-linhas' }, swEmail.el, swDisp.el)));
     sincs.forEach((f) => f());
@@ -349,7 +383,8 @@ async function montarLista(raiz, meta, abaInicial, qs) {
     const cs = [];
     CHAVES_LISTA.forEach((k) => L.f[k].forEach((v) => cs.push(chip(ROTULO_FILTRO[k](v), () => { L.f[k] = L.f[k].filter((x) => x !== v); mudou({ sync: true }); }, `Remover filtro ${ROTULO_FILTRO[k](v)}`))));
     if (L.f.pasta) cs.push(chip(L.f.pasta === 'fora' ? 'Fora de pastas' : `Pasta: ${(L.pastas.find((p) => String(p.id) === L.f.pasta) || {}).nome || L.f.pasta}`, () => { L.f.pasta = ''; mudou({ sync: true }); }, 'Remover filtro de pasta'));
-    if (L.f.aptidao_min > 0) cs.push(chip(`Potencial ${L.f.aptidao_min}+`, () => { L.f.aptidao_min = 0; mudou({ sync: true }); }));
+    if (L.f.aptidao_min > 0) cs.push(chip(`${empresa ? 'Encaixe' : 'Potencial'} ${L.f.aptidao_min}+`, () => { L.f.aptidao_min = 0; mudou({ sync: true }); }));
+    if (L.f.ia_min > 0) cs.push(chip(`Nota da IA ${L.f.ia_min}+`, () => { L.f.ia_min = 0; mudou({ sync: true }); }));
     if (L.f.com_email) cs.push(chip('Só com e-mail', () => { L.f.com_email = false; mudou({ sync: true }); }));
     if (!L.f.so_disparo) cs.push(chip('Inclui fora do disparo', () => { L.f.so_disparo = true; mudou({ sync: true }); }));
     if (L.f.busca.trim()) cs.push(chip(`“${L.f.busca.trim()}”`, () => { L.f.busca = ''; busca.value = ''; mudou({ sync: true }); }, 'Remover busca'));
@@ -664,6 +699,7 @@ function perfilContato(l, opc, ctx, empresa) {
   const nome = nomeCompleto(l), dig = soDigitos(l.telefone);
   const chance = Number(l.chance_dono) || 0;
   const casa = Number(l.potencial_casa), emp = Number(l.potencial_empresa), apt = Number(l.aptidao_solar);
+  const encaixe = vazio(l.encaixe) ? NaN : Number(l.encaixe), notaIa = vazio(l.nota_ia) ? NaN : Number(l.nota_ia);
   const o = empresa ? null : OPORT[l.oportunidade];
   const grupos = [];
   gruposDoDetalhe(l, empresa).forEach((itens, g) => {
@@ -672,7 +708,9 @@ function perfilContato(l, opc, ctx, empresa) {
     if (linhas.length) grupos.push(h('section', { class: 'pf-grupo' }, h('h3', {}, icone(ICONE_GRUPO[g] || 'info', 18), g), h('dl', { class: 'ir-grupo' }, linhas)));
   });
   const aneis = [h('div', { class: 'pf-anel' }, anel({ valor: chance, texto: `${chance}%`, cor: '--verde', tam: 76, espessura: 7, rotulo: `Chance de ser o dono: ${chance}%` }), h('span', { text: 'Chance de ser o dono' }))];
-  if (empresa) fatosDaEmpresa(l).forEach((f) => aneis.push(h('div', { class: 'pf-anel' }, h('span', { class: 'pf-fato-v' + (f.txt ? ' txt' : ''), text: f.v }), h('span', { text: f.r }))));
+  if (Number.isFinite(notaIa)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: notaIa * 10, texto: String(notaIa), cor: '--roxo', tam: 76, espessura: 7, rotulo: `Nota da IA: ${notaIa} de 10` }), h('span', { text: 'Nota da IA' })));
+  if (empresa && Number.isFinite(encaixe)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: encaixe * 10, texto: String(encaixe), cor: '--acento', tam: 76, espessura: 7, rotulo: `Encaixe no perfil: ${encaixe} de 10` }), h('span', { text: 'Encaixe no perfil' })));
+  if (empresa) fatosDaEmpresa(l).slice(0, Number.isFinite(notaIa) ? 1 : 2).forEach((f) => aneis.push(h('div', { class: 'pf-anel' }, h('span', { class: 'pf-fato-v' + (f.txt ? ' txt' : ''), text: f.v }), h('span', { text: f.r }))));
   if (!empresa && Number.isFinite(casa)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: casa * 10, texto: String(casa), cor: '--acento', tam: 76, espessura: 7, rotulo: `Potencial da casa: ${casa} de 10` }), h('span', { text: 'Potencial da casa' })));
   if (!empresa && Number.isFinite(emp)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: emp * 10, texto: String(emp), cor: '--laranja', tam: 76, espessura: 7, rotulo: `Potencial da empresa: ${emp} de 10` }), h('span', { text: 'Potencial da empresa' })));
   if (!empresa && !Number.isFinite(casa) && !Number.isFinite(emp) && Number.isFinite(apt)) aneis.push(h('div', { class: 'pf-anel' }, anel({ valor: apt * 10, texto: String(apt), cor: '--acento', tam: 76, espessura: 7, rotulo: `Potencial: ${apt} de 10` }), h('span', { text: 'Potencial' })));

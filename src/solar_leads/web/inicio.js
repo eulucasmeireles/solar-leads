@@ -1,5 +1,5 @@
 'use strict';
-/* Solar Leads - telas Início e Listas */
+/* Garimpo - telas Início e Listas */
 
 const EM_ANDAMENTO = (m) => m.status === 'na_fila' || m.status === 'gerando';
 const porData = (a, b) => String(b.criada_em).localeCompare(String(a.criada_em));
@@ -83,8 +83,8 @@ function esqueletoCartoes(n) {
 /* ---------- folha "Nova lista" ---------- */
 let whatsDisp = { disponivel: false, motivo: '' };
 
-function folhaNovaLista(cidade) {
-  const estado = { publico: 'dono', cnaes: [], modo: 'todas', so_locais: true, so_ativas: false, incluir_mei: false, validar_whatsapp: false };
+function folhaNovaLista(cidade, perfilInicial) {
+  const estado = { perfil: perfilInicial || 'solar', cnaes: [], modo: 'todas', so_locais: true, so_ativas: false, incluir_mei: false, validar_whatsapp: false };
   const idT = uid('folha');
   const zonaEscolher = h('div', { class: 'folha-escolher', hidden: true });
   const chips = h('div', { class: 'chips' });
@@ -105,8 +105,25 @@ function folhaNovaLista(cidade) {
     opcoes: [{ valor: 'todas', rotulo: 'Todas as atividades' }, { valor: 'escolher', rotulo: 'Escolher' }], valor: 'todas', rotulo: 'Atividades', papel: 'radio',
     aoMudar: (v) => { estado.modo = v; zonaEscolher.hidden = v !== 'escolher'; if (v === 'escolher') ativ.input.focus(); },
   });
-  const sw = (rotulo, desc, chave, extra = {}) => interruptor({ rotulo, descricao: desc, checked: estado[chave], disabled: extra.disabled, aoMudar: (v) => { estado[chave] = v; } }).el;
-  const publico = opcoesPublico({ valor: estado.publico, aoMudar: (v) => { estado.publico = v; } });
+  const chaves = {};
+  const sw = (rotulo, desc, chave, extra = {}) => { const s = interruptor({ rotulo, descricao: desc, checked: estado[chave], disabled: extra.disabled, aoMudar: (v) => { estado[chave] = v; } }); chaves[chave] = s.input; return s.el; };
+  /* escolher um perfil salvo traz as atividades e as opções dele; dá para ajustar antes de gerar */
+  function aplicarPerfil(p) {
+    estado.perfil = p.id;
+    const r = p.receita || {};
+    if (p.pronto) return;
+    estado.cnaes = (r.atividades || []).map((a) => ({ codigo: a.codigo, descricao: a.descricao }));
+    estado.modo = estado.cnaes.length ? 'escolher' : 'todas';
+    modo.definir(estado.modo, false); zonaEscolher.hidden = estado.modo !== 'escolher'; desenharChips();
+    const f = r.filtros || {};
+    ['so_ativas', 'incluir_mei', 'so_locais'].forEach((k) => { if (k in f) { estado[k] = !!f[k]; if (chaves[k]) chaves[k].checked = estado[k]; } });
+  }
+  const zonaPerfil = h('div', {}, esqueleto('100%', '64px'));
+  carregarPerfis().then((ps) => {
+    const escolhido = ps.find((p) => p.id === estado.perfil) || ps[0];
+    zonaPerfil.replaceChildren(opcoesPerfil({ perfis: ps, valor: escolhido.id, aoMudar: aplicarPerfil }).el);
+    aplicarPerfil(escolhido);
+  }).catch((e) => zonaPerfil.replaceChildren(h('p', { class: 'erro-inline', text: e.message })));
   const erro = h('p', { class: 'erro-inline', role: 'alert' });
   const botao = h('button', { class: 'btn btn-prim btn-grande', type: 'button' }, 'Gerar lista');
   botao.addEventListener('click', async () => {
@@ -114,7 +131,7 @@ function folhaNovaLista(cidade) {
     botao.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Enviando…');
     try {
       const r = await api('/api/listas', { method: 'POST', corpo: {
-        uf: cidade.uf, cidade: cidade.nome, publico: estado.publico, cnaes: estado.modo === 'escolher' ? estado.cnaes.map((a) => a.codigo) : [],
+        uf: cidade.uf, cidade: cidade.nome, perfil: estado.perfil, cnaes: estado.modo === 'escolher' ? estado.cnaes.map((a) => a.codigo) : [],
         so_ativas: estado.so_ativas, incluir_mei: estado.incluir_mei, so_locais: estado.so_locais, validar_whatsapp: estado.validar_whatsapp && whatsDisp.disponivel,
       } });
       m.fechar();
@@ -127,13 +144,13 @@ function folhaNovaLista(cidade) {
       h('button', { class: 'btn-icone', type: 'button', 'aria-label': 'Fechar', onclick: () => m.fechar() }, icone('x', 20))),
     h('div', { class: 'folha-corpo' },
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Atividades' }), modo.el, zonaEscolher),
-      h('section', { class: 'folha-sec' }, h('h3', { text: 'Para que é esta lista?' }), publico.el),
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Perfil' }), zonaPerfil),
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Opções' }),
         h('div', { class: 'grupo-linhas' },
           sw('Só empresas da cidade', 'Sede na cidade e telefone da região. Tira filiais e números de fora.', 'so_locais'),
           sw('Só empresas ativas', 'Deixa de fora CNPJs baixados, suspensos ou inaptos.', 'so_ativas'),
           sw('Incluir MEI', 'Microempreendedores individuais entram na lista.', 'incluir_mei'),
-          sw('Verificar WhatsApp ao gerar', whatsDisp.disponivel ? 'Mais lento: confere cada número ao montar a lista.' : `Indisponível agora. ${whatsDisp.motivo || 'Conecte um WhatsApp primeiro.'}`, 'validar_whatsapp', { disabled: !whatsDisp.disponivel })))),
+          sw('Verificar WhatsApp ao gerar', whatsDisp.disponivel ? 'Confere os 500 primeiros contatos pela CheckLeaked. Gasta até 500 consultas do saldo.' : `Indisponível agora. ${whatsDisp.motivo || 'Falta a chave da CheckLeaked.'}`, 'validar_whatsapp', { disabled: !whatsDisp.disponivel })))),
     h('footer', { class: 'folha-rodape' }, erro, botao));
   const m = abrirModal(painel);
 }
@@ -142,10 +159,10 @@ function folhaNovaLista(cidade) {
 let ufsCache = null;
 
 function folhaPorNome() {
-  const E = { publico: 'empresa', palavras: [], uf: '', previa: null, marcadas: new Set(), so_ativas: true, incluir_mei: false, busca: 0 };
+  const E = { perfil: 'geral', palavras: [], uf: '', previa: null, marcadas: new Set(), so_ativas: true, incluir_mei: false, busca: 0 };
   const idT = uid('folha');
   const chips = h('div', { class: 'chips', hidden: true });
-  const campo = h('input', { type: 'text', id: uid('palavras'), placeholder: 'Ex.: solar, fotovolt', autocomplete: 'off', spellcheck: 'false', maxlength: '40', 'aria-label': 'Palavras do nome da empresa', 'data-foco': '' });
+  const campo = h('input', { type: 'text', id: uid('palavras'), placeholder: 'Ex.: academia, pilates', autocomplete: 'off', spellcheck: 'false', maxlength: '40', 'aria-label': 'Palavras do nome da empresa', 'data-foco': '' });
   const seletorUF = h('select', { id: uid('regiao'), 'aria-label': 'Região' }, h('option', { value: '', text: 'Brasil inteiro' }));
   (ufsCache ? Promise.resolve(ufsCache) : api('/api/ufs')).then((u) => { ufsCache = u; seletorUF.append(...u.map((x) => h('option', { value: x, text: x }))); seletorUF.value = E.uf; }).catch(() => {});
   const zonaPrevia = h('section', { class: 'folha-sec', hidden: true, 'aria-live': 'polite' });
@@ -175,8 +192,10 @@ function folhaPorNome() {
   seletorUF.addEventListener('change', () => { E.uf = seletorUF.value; invalidar(); });
   desenharChips();
 
-  /* o público não muda a prévia: não invalida */
-  const publico = opcoesPublico({ valor: E.publico, aoMudar: (v) => { E.publico = v; } });
+  /* o perfil não muda a prévia: não invalida */
+  const zonaPerfil = h('div', {}, esqueleto('100%', '64px'));
+  carregarPerfis().then((ps) => zonaPerfil.replaceChildren(opcoesPerfil({ perfis: ps, valor: E.perfil, aoMudar: (p) => { E.perfil = p.id; } }).el))
+    .catch((e) => zonaPerfil.replaceChildren(h('p', { class: 'erro-inline', text: e.message })));
   const soma = h('p', { class: 'prev-soma' });
   function desenharSoma() {
     const itens = E.previa.atividades;
@@ -244,7 +263,7 @@ function folhaPorNome() {
     btnGerar.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Enviando…');
     try {
       const r = await api('/api/listas', { method: 'POST', corpo: {
-        palavras: E.palavras.slice(), uf: E.uf, publico: E.publico, cnaes: [...E.marcadas], so_ativas: E.so_ativas, incluir_mei: E.incluir_mei, so_locais: true, validar_whatsapp: false,
+        palavras: E.palavras.slice(), uf: E.uf, perfil: E.perfil, cnaes: [...E.marcadas], so_ativas: E.so_ativas, incluir_mei: E.incluir_mei, so_locais: true, validar_whatsapp: false,
       } });
       m.fechar();
       location.hash = `#/lista/${encodeURIComponent(r.id)}`;
@@ -259,7 +278,7 @@ function folhaPorNome() {
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Palavras do nome' }), campo, chips,
         h('p', { class: 'dica', text: 'Entram as empresas que têm qualquer uma dessas palavras no nome ou na razão social.' })),
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Região' }), seletorUF),
-      h('section', { class: 'folha-sec' }, h('h3', { text: 'Para que é esta lista?' }), publico.el),
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Perfil' }), zonaPerfil),
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Opções' }),
         h('div', { class: 'grupo-linhas' },
           sw('Só empresas ativas', 'Deixa de fora CNPJs baixados, suspensos ou inaptos.', 'so_ativas'),
@@ -270,26 +289,69 @@ function folhaPorNome() {
   const m = abrirModal(painel);
 }
 
+/* ---------- perfis salvos (Início) ---------- */
+function cartaoPerfil(p, { aoUsar, aoExcluir }) {
+  const r = p.receita || {}, n = (r.atividades || []).length;
+  const menu = criarMenu(icone('pontos', 20), [{ rotulo: 'Excluir perfil', icone: 'lixeira', perigo: true, aoClicar: () => aoExcluir(p) }],
+    { classeBotao: 'btn-icone', rotulo: `Mais opções do perfil ${p.nome}` });
+  menu.classList.add('cl-menu');
+  const usar = h('button', { class: 'cl-link link-btn', type: 'button', onclick: () => aoUsar(p) }, p.nome);
+  return h('article', { class: 'cartao cartao-lista cartao-perfil' },
+    h('header', { class: 'cl-topo' }, h('h3', {}, usar), menu),
+    h('p', { class: 'cl-ativ', text: r.oferta || r.cliente_ideal || 'Perfil sem descrição' }),
+    h('footer', { class: 'cl-rodape' }, h('span', { class: 'cl-sub', text: n ? `${num(n)} ${n === 1 ? 'atividade' : 'atividades'}` : 'Todas as atividades' }),
+      h('span', { class: 'link-seta' }, 'Gerar em outra cidade', icone('direita', 14))));
+}
+
+async function excluirPerfil(p, depois) {
+  const ok = await confirmar({ titulo: 'Excluir este perfil?', texto: `O perfil “${p.nome}” será apagado. As listas já geradas com ele continuam iguais.`, ok: 'Excluir', perigo: true });
+  if (!ok) return;
+  try { await api(`/api/perfis/${encodeURIComponent(p.id)}`, { method: 'DELETE' }); avisar('Perfil excluído.'); await carregarPerfis(true); depois(); }
+  catch (e) { avisar(e.message, 'erro'); }
+}
+
 /* ---------- Início ---------- */
 function telaInicio(raiz) {
-  document.title = 'Início · Solar Leads';
+  document.title = 'Início · Garimpo';
   const gradeRecentes = h('div', { class: 'grade-listas' }, esqueletoCartoes(3));
   const faixaNumeros = h('ul', { class: 'numeros-base' });
 
+  /* perfil escolhido em "Seus perfis": a próxima cidade escolhida já abre com ele */
+  let perfilDaCidade = null;
+  const avisoPerfil = h('div', { class: 'aviso-perfil', hidden: true });
+  function escolherPerfil(p) {
+    perfilDaCidade = p;
+    avisoPerfil.hidden = !p;
+    avisoPerfil.replaceChildren(...(p ? [chip(`Perfil: ${p.nome}`, () => escolherPerfil(null), 'Tirar o perfil escolhido')] : []));
+    if (p) { modos.definir('cidade'); mudarModo('cidade'); combo.input.focus(); combo.input.scrollIntoView({ block: 'center', behavior: 'smooth' }); avisar(`Escolha a cidade para o perfil “${p.nome}”.`); }
+  }
   const combo = criarCombo({
     rotulo: 'Cidade', placeholder: 'Buscar cidade…', minimo: 2, grande: true, vazio: 'Nenhuma cidade encontrada.',
     buscar: (q, signal) => api(`/api/cidades?q=${encodeURIComponent(q)}`, { signal }),
     render: (c) => [h('span', { class: 'ci-nome', text: titleCase(c.nome) }), h('span', { class: 'ci-n', text: `${c.uf} · ${num(c.empresas)} empresas` })],
-    aoEscolher: (c) => folhaNovaLista(c),
+    aoEscolher: (c) => folhaNovaLista(c, perfilDaCidade ? perfilDaCidade.id : null),
   });
 
+  /* dois jeitos de começar: descrever para a IA ou escolher a cidade */
+  const caixa = caixaDescricao({ aoEnviar: iniciarBuscaIA });
+  const zonaIA = h('div', {}, caixa.el);
+  const zonaCidade = h('div', { hidden: true }, h('label', { class: 'so-leitor', for: combo.input.id, text: 'Cidade' }), combo.el, avisoPerfil,
+    h('button', { class: 'link-btn link-nome', type: 'button', onclick: folhaPorNome }, 'Ou procure empresas pelo nome, no Brasil inteiro', icone('direita', 14)));
+  let modoAtual = 'ia';
+  const apoio = h('p', { class: 'apoio' });
+  function mudarModo(v, foco) {
+    modoAtual = v;
+    zonaIA.hidden = v !== 'ia'; zonaCidade.hidden = v !== 'cidade';
+    apoio.textContent = v === 'ia' ? 'Descreva o que você vende e quem quer encontrar. A IA monta a busca.' : 'Escolha uma cidade e montamos a lista de contatos.';
+    if (foco) (v === 'ia' ? caixa.campo : combo.input).focus({ preventScroll: true });
+  }
+  const modos = segmentado({ opcoes: [{ valor: 'ia', rotulo: 'Descrever com IA' }, { valor: 'cidade', rotulo: 'Escolher cidade' }], valor: 'ia', rotulo: 'Como começar', papel: 'radio', aoMudar: (v) => mudarModo(v, true) });
+  mudarModo('ia');
   const topo = h('section', { class: 'heroi' },
     h('div', { class: 'brilho', 'aria-hidden': 'true' }, h('i', { class: 'b1' }), h('i', { class: 'b2' }), h('i', { class: 'b3' })),
     h('p', { class: 'saud', text: saudacao() }),
-    h('h1', { text: 'Onde vamos prospectar hoje?' }),
-    h('p', { class: 'apoio', text: 'Escolha uma cidade e montamos a lista de contatos.' }),
-    h('label', { class: 'so-leitor', for: combo.input.id, text: 'Cidade' }), combo.el,
-    h('button', { class: 'link-btn link-nome', type: 'button', onclick: folhaPorNome }, 'Ou procure empresas pelo nome, no Brasil inteiro', icone('direita', 14)), faixaNumeros);
+    h('h1', { text: 'Quem você quer encontrar hoje?' }),
+    apoio, h('div', { class: 'modos-heroi' }, modos.el), zonaIA, zonaCidade, faixaNumeros);
 
   function desenharRecentes(lista) {
     if (!lista.length) { gradeRecentes.replaceChildren(estadoVazio('Nenhuma lista ainda', 'Escolha uma cidade acima para gerar a primeira.', null, 'listas')); return; }
@@ -297,7 +359,7 @@ function telaInicio(raiz) {
   }
   const recarregar = vigiarListas(desenharRecentes, (e) => gradeRecentes.replaceChildren(estadoErro(e.message, () => recarregar())));
 
-  api('/api/whatsapp').then((w) => { whatsDisp = w; }).catch(() => {});
+  api('/api/whatsapp').then((w) => { whatsDisp = { disponivel: !!(w.servico && w.servico.configurado), motivo: textoSaldo(w.servico) }; }).catch(() => {});
   api('/api/base').then((b) => {
     const it = (ic, v, r) => h('li', {}, icone(ic, 18), h('strong', { text: v }), h('span', { text: r }));
     faixaNumeros.replaceChildren(
@@ -306,16 +368,28 @@ function telaInicio(raiz) {
       it('sol', b.aneel ? num(b.aneel.sistemas) : '—', 'sistemas solares'));
   }).catch(() => faixaNumeros.replaceChildren());
 
-  raiz.append(topo,
+  const gradePerfis = h('div', { class: 'grade-listas' });
+  const secaoPerfis = h('section', { class: 'secao', 'aria-labelledby': 'tit-perfis', hidden: true },
+    h('header', { class: 'secao-cab' }, h('h2', { id: 'tit-perfis', text: 'Seus perfis' })), gradePerfis);
+  function desenharPerfis() {
+    carregarPerfis().then((ps) => {
+      const meus = ps.filter((p) => !p.pronto);
+      secaoPerfis.hidden = !meus.length;
+      gradePerfis.replaceChildren(...meus.slice(0, 6).map((p) => cartaoPerfil(p, { aoUsar: escolherPerfil, aoExcluir: (x) => excluirPerfil(x, desenharPerfis) })));
+    }).catch(() => { secaoPerfis.hidden = true; });
+  }
+  desenharPerfis();
+
+  raiz.append(topo, secaoPerfis,
     h('section', { class: 'secao', 'aria-labelledby': 'tit-rec' },
       h('header', { class: 'secao-cab' }, h('h2', { id: 'tit-rec', text: 'Suas listas' }), h('a', { class: 'link-seta', href: '#/listas' }, 'Ver todas', icone('direita', 16))),
       gradeRecentes));
-  if (window.innerWidth >= 700) setTimeout(() => combo.input.focus({ preventScroll: true }), 80);
+  if (window.innerWidth >= 700) setTimeout(() => (modoAtual === 'ia' ? caixa.campo : combo.input).focus({ preventScroll: true }), 80);
 }
 
 /* ---------- Listas ---------- */
 function telaListas(raiz) {
-  document.title = 'Listas · Solar Leads';
+  document.title = 'Listas · Garimpo';
   const grade = h('div', { class: 'grade-listas' }, esqueletoCartoes(6));
   let todas = [];
   const busca = h('input', { type: 'search', id: 'busca-listas', placeholder: 'Buscar por cidade ou nome…', autocomplete: 'off', 'aria-label': 'Buscar lista por cidade ou nome' });

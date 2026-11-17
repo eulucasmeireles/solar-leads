@@ -101,7 +101,7 @@ def test_pdf_da_lista_baixa_e_fica_no_historico(logado, lista):
     r = logado.get(f"/api/listas/{lista}/pdf")
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/pdf"
-    assert r.headers["content-disposition"].startswith('attachment; filename="solar-leads-montes-claros-mg-') and r.headers["content-disposition"].endswith('.pdf"')
+    assert r.headers["content-disposition"].startswith('attachment; filename="garimpo-montes-claros-mg-') and r.headers["content-disposition"].endswith('.pdf"')
     assert r.content.startswith(b"%PDF") and paginas(r.content) == 1 + 2
     ultima = logado.get("/api/exportacoes").json()[0]
     assert ultima["descricao"] == "PDF da lista de Montes Claros/MG" and ultima["contatos"] == 9
