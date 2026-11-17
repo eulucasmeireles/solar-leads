@@ -20,13 +20,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
+import anyio
 import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import aneel, avaliacao_ia, busca_ia, chaves, cnpj_db, config, consulta, enriquecer, ia, pastas, perfis, pipeline, relatorio, whatsapp
+from .. import aneel, avaliacao_ia, busca_ia, chaves, cnpj_db, config, consulta, enriquecer, ia, oauth, pastas, perfis, pipeline, relatorio, whatsapp
 from ..telefone import e164, normalizar, so_digitos
 from . import mcp_garimpo
 
@@ -84,6 +85,8 @@ if (not SENHA_HASH or len(SEGREDO) < 32) and os.getenv("LEADS_SEM_SENHA") != "1"
     raise RuntimeError(
         "Falta LEADS_SENHA_HASH ou LEADS_SEGREDO no .env. Rode `leads senha`, ou defina LEADS_SEM_SENHA=1 para uso só local."
     )
+# Endereço público do sistema: o login OAuth do MCP se identifica por ele (as ferramentas conferem).
+URL_PUBLICA = os.getenv("GARIMPO_URL", "https://garimpo.lucasmeireles.pro").rstrip("/")
 COOKIE = "sl_sessao"
 VALIDADE_S = 30 * 24 * 3600
 MAX_ERROS, BLOQUEIO_S = 5, 15 * 60
@@ -143,8 +146,11 @@ _api_erros: dict[str, list[float]] = {}  # ip -> [chaves erradas seguidas, bloqu
 _api_chamadas: dict[int, list[float]] = {}  # id da chave -> horários das chamadas do último minuto
 
 
-def _conferir_chave(request: Request) -> JSONResponse | None:
-    """None se a requisição traz uma chave de API válida e dentro do limite; senão, a resposta de recusa."""
+def _conferir_chave(request: Request, mcp: bool = False) -> JSONResponse | None:
+    """None se a requisição traz uma chave de API válida e dentro do limite; senão, a resposta de recusa.
+
+    No /mcp (`mcp=True`) também vale o acesso dado pelo login OAuth, e a recusa diz onde fazer o login.
+    """
     ip, agora = _ip(request), time.time()
     erros, ate = _api_erros.get(ip, [0, 0.0])
     if agora < ate:
@@ -154,15 +160,19 @@ def _conferir_chave(request: Request) -> JSONResponse | None:
         )
     cabecalho = request.headers.get("authorization", "")
     chave = cabecalho[7:].strip() if cabecalho[:7].lower() == "bearer " else request.headers.get("x-api-key", "").strip()
-    registro = chaves.conferir(chave)
+    registro = chaves.conferir(chave) or (oauth.conferir(chave) if mcp else None)
     if not registro:
         erros += 1
         _api_erros[ip] = [0, agora + BLOQUEIO_S] if erros >= API_MAX_ERROS else [erros, 0.0]
         if len(_api_erros) > 5000:
             _api_erros.clear()
+        desafio = "Bearer"
+        if mcp:  # RFC 9728: aponta a ferramenta para o login OAuth
+            desafio = f'Bearer resource_metadata="{URL_PUBLICA}/.well-known/oauth-protected-resource{mcp_garimpo.CAMINHO}"'
         return JSONResponse(
-            {"detail": "Chave de API ausente ou inválida. Envie no cabeçalho: Authorization: Bearer <sua chave>."},
-            status_code=401, headers={"WWW-Authenticate": "Bearer"},
+            {"detail": "Chave de API ausente ou inválida. Envie no cabeçalho: Authorization: Bearer <sua chave>"
+             + (", ou faça o login OAuth do MCP." if mcp else ".")},
+            status_code=401, headers={"WWW-Authenticate": desafio},
         )
     _api_erros.pop(ip, None)
     recentes = [t for t in _api_chamadas.get(registro["id"], []) if agora - t < 60]
@@ -185,12 +195,13 @@ async def exigir_sessao(request: Request, call_next):
     if ".." in caminho.split("/") or "\\" in caminho or "%" in caminho:
         return JSONResponse({"detail": "Endereço inválido."}, status_code=404)
     fonte = caminho.startswith("/static/fonts/") and caminho.endswith(".woff2") and caminho.count("/") == 3
-    livre = caminho in ("/login", "/api/login", "/api/sessao") or fonte
+    livre = caminho in ("/login", "/api/login", "/api/sessao") or fonte or caminho in mcp_garimpo.ROTAS_DO_LOGIN \
+        or caminho.startswith("/.well-known/")
     # A API das automações (/api/v1) e o servidor MCP (/mcp) aceitam uma chave no lugar da sessão.
     # A chave não abre mais nada: nem a página, nem as rotas internas, nem a criação de outras chaves.
     automacao = caminho.startswith("/api/v1/") or caminho == mcp_garimpo.CAMINHO
     if SENHA_HASH and automacao and not _sessao_valida(request.cookies.get(COOKIE)):
-        recusa = _conferir_chave(request)
+        recusa = _conferir_chave(request, mcp=caminho == mcp_garimpo.CAMINHO)
         if recusa is not None:
             return recusa
         resposta = await call_next(request)
@@ -220,14 +231,13 @@ def sessao(request: Request) -> dict:
     return {"protegido": bool(SENHA_HASH), "dentro": not SENHA_HASH or _sessao_valida(request.cookies.get(COOKIE))}
 
 
-@app.post("/api/login")
-def entrar(entrada: Entrada, request: Request) -> JSONResponse:
-    ip = _ip(request)
+def _conferir_senha(senha: str, ip: str) -> None:
+    """Confere a senha com o mesmo limite de tentativas para o login e para autorizar o MCP."""
     erros, ate = _tentativas.get(ip, [0, 0.0])
     if time.time() < ate:
         minutos = int((ate - time.time()) // 60) + 1
         raise HTTPException(429, f"Muitas tentativas. Tente de novo em {minutos} min.")
-    if not SENHA_HASH or not _senha_confere(entrada.senha):
+    if not SENHA_HASH or not _senha_confere(senha):
         time.sleep(0.8)  # atrasa quem tenta adivinhar
         erros += 1
         bloqueou = erros >= MAX_ERROS
@@ -238,6 +248,12 @@ def entrar(entrada: Entrada, request: Request) -> JSONResponse:
         pastas.registrar_acesso("bloqueado" if bloqueou else "senha errada", ip)
         raise HTTPException(401, "Senha incorreta.")
     _tentativas.pop(ip, None)
+
+
+@app.post("/api/login")
+def entrar(entrada: Entrada, request: Request) -> JSONResponse:
+    ip = _ip(request)
+    _conferir_senha(entrada.senha, ip)
     pastas.registrar_acesso("entrou", ip)
     validade, marca = int(time.time()) + VALIDADE_S, os.urandom(8).hex()
     resposta = JSONResponse({"ok": True})
@@ -533,15 +549,20 @@ def qr_whatsapp() -> dict:
 MAX_VERIFICAR = 5000  # números por pedido de verificação
 
 
-def _numeros_da_lista(meta: dict, quantidade: int) -> list[str]:
+def _numeros_da_lista(meta: dict, quantidade: int, f: Filtros | None = None) -> list[str]:
     """Os próximos números da lista ainda sem WhatsApp verificado, na ordem da tela (nota da IA primeiro, se houver).
 
-    Devolve números nacionais (DDD + número), um por contato de disparo.
+    Devolve números nacionais (DDD + número), um por contato de disparo. Com `f` (o MCP), vale o filtro e a
+    ordem pedidos, e só entra quem ainda não está em nenhuma pasta: não se gasta saldo com contato já usado.
     """
-    cte, params = _consulta(_parquet(meta["id"]), {}, {}, 0, 1, "")
-    ordem = "nota_ia DESC NULLS LAST, ordem" if (meta.get("avaliacao") or {}).get("avaliadas") else "ordem"
+    if f is None:
+        cte, params = _consulta(_parquet(meta["id"]), {}, {}, 0, 1, "")
+        ordem = "nota_ia DESC NULLS LAST, ordem" if (meta.get("avaliacao") or {}).get("avaliadas") else "ordem"
+    else:
+        cte, params = f.consulta(_parquet(meta["id"]), "fora")
+        ordem = f.ordem
     linhas = duckdb.connect().execute(
-        f"{cte} SELECT telefone FROM r WHERE whatsapp <> 'sim' AND telefone LIKE '+55%' ORDER BY {ordem} LIMIT ?",
+        f"{cte} SELECT telefone FROM r WHERE whatsapp NOT IN ('sim', 'não') AND telefone LIKE '+55%' ORDER BY {ordem} LIMIT ?",
         params + [quantidade],
     ).fetchall()
     return [t[0].removeprefix("+55") for t in linhas]
@@ -551,8 +572,10 @@ def _numeros_da_lista(meta: dict, quantidade: int) -> list[str]:
 def estimativa_whatsapp(id_: str, quantidade: int = 500) -> dict:
     """Antes de verificar: quantos números entram, quantos já estão no cadastro e quanto saldo isso gasta."""
     meta = _ler_meta(id_)
-    quantidade = max(1, min(MAX_VERIFICAR, quantidade))
-    numeros = _numeros_da_lista(meta, quantidade)
+    return _estimar_verificacao(_numeros_da_lista(meta, max(1, min(MAX_VERIFICAR, quantidade))))
+
+
+def _estimar_verificacao(numeros: list[str]) -> dict:
     con = cnpj_db.conectar(tentativas=2)
     try:
         ja = len(whatsapp.do_cache(con, numeros))
@@ -570,12 +593,17 @@ class PedidoVerificacao(BaseModel):
 @app.post("/api/whatsapp/verificacao")
 def iniciar_verificacao(pedido: PedidoVerificacao) -> dict:
     """Verifica pela CheckLeaked os próximos números da lista e, no fim, refaz a lista com os resultados."""
+    meta = _ler_meta(pedido.lista_id)
+    return comecar_verificacao(meta, lambda: _numeros_da_lista(meta, max(1, min(MAX_VERIFICAR, pedido.quantidade))))
+
+
+def comecar_verificacao(meta: dict, escolher) -> dict:
+    """Põe a verificação para rodar em segundo plano. `escolher()` devolve os números (só é chamado se puder rodar)."""
     if _verificando():
         raise HTTPException(409, "Já existe uma verificação em andamento.")
     if not os.getenv("CHECKLEAKED_KEY", "").strip():
         raise HTTPException(409, "Falta a chave da CheckLeaked. Rode `leads segredo CHECKLEAKED_KEY` no servidor.")
-    meta = _ler_meta(pedido.lista_id)
-    numeros = _numeros_da_lista(meta, max(1, min(MAX_VERIFICAR, pedido.quantidade)))
+    numeros = escolher()
     if not numeros:
         raise HTTPException(400, "Todos os contatos desta lista já têm o WhatsApp verificado.")
 
@@ -1363,6 +1391,25 @@ def excluir(id_: str) -> dict:
 # ---------- consulta ----------
 
 _FILTROS_IN = ("faixa", "situacao", "papel", "bairro", "atividade", "tipo_whatsapp", "solar", "oportunidade", "uf", "cidade")
+# A situação do WhatsApp numa palavra só, para filtrar: tipo da conta, sem WhatsApp ou ainda não verificado.
+_SITUACAO_WHATSAPP = (
+    "CASE WHEN tipo_whatsapp IN ('pessoal', 'business') THEN tipo_whatsapp WHEN whatsapp = 'sim' THEN 'com_whatsapp' "
+    "WHEN whatsapp = 'não' THEN 'sem_whatsapp' ELSE 'nao_verificado' END"
+)
+SITUACOES_WHATSAPP = ("pessoal", "business", "com_whatsapp", "sem_whatsapp", "nao_verificado")
+# Id de cada contato: tirado do telefone com o segredo do sistema, igual em todas as listas e pastas,
+# sem mostrar o número (para automações marcarem contatos sem trafegar o dado pessoal no id).
+_ID_SQL = "substr(sha256(? || telefone), 1, 16)"
+
+
+def id_do_contato(telefone: str) -> str:
+    return hashlib.sha256((SEGREDO + telefone).encode()).hexdigest()[:16] if telefone else ""
+
+
+def _com_ids(linhas: list[dict]) -> list[dict]:
+    for l in linhas:
+        l["contato_id"] = id_do_contato(l.get("telefone") or "")
+    return linhas
 _ORDENS = {
     "relevancia": "ordem",
     # "aptidao" é o nome antigo: o encaixe no perfil, que nas listas de energia solar é a própria nota solar.
@@ -1389,6 +1436,12 @@ def _consulta(
         if valores:
             cond.append(f"{campo} IN (SELECT unnest(?))")
             params.append(valores)
+    if filtros.get("situacao_whatsapp"):
+        cond.append(f"({_SITUACAO_WHATSAPP}) IN (SELECT unnest(?))")
+        params.append(filtros["situacao_whatsapp"])
+    if filtros.get("ids") is not None:
+        cond.append(f"{_ID_SQL} IN (SELECT unnest(?))")
+        params.extend([SEGREDO, filtros["ids"] or [""]])
     for coluna, minimo in (minimos or {}).items():
         if minimo:
             cond.append(f"{coluna} >= ?")
@@ -1435,10 +1488,14 @@ class Filtros:
         uf: Lista = None, cidade: Lista = None,
         aptidao_min: int | None = None, com_email: int = 0, so_disparo: int = 1, busca: str = "",
         ordem: str = "relevancia", pasta: str | None = None, encaixe_min: int | None = None, ia_min: int | None = None,
+        situacao_whatsapp: Lista = None, ids: Lista = None,
     ) -> None:
         self.em = {
             "faixa": faixa, "situacao": situacao, "papel": papel, "bairro": bairro, "atividade": atividade,
             "tipo_whatsapp": tipo_whatsapp, "solar": solar, "oportunidade": oportunidade, "uf": uf, "cidade": cidade,
+            # "pessoal", "business", "com_whatsapp", "sem_whatsapp", "nao_verificado" (ver `_SITUACAO_WHATSAPP`)
+            "situacao_whatsapp": situacao_whatsapp,
+            "ids": ids,  # ids de contato (`id_do_contato`); None = sem esse filtro
         }
         self.aptidao_min, self.com_email, self.so_disparo, self.busca = aptidao_min, com_email, so_disparo, busca
         self.encaixe_min, self.ia_min = encaixe_min, ia_min
@@ -1507,7 +1564,7 @@ def contatos(id_: str, f: Annotated[Filtros, Depends()], pagina: int = 1, por_pa
         )
     )
     onde = pastas.pastas_dos([l["telefone"] for l in linhas if l["telefone"]])
-    for l in linhas:
+    for l in _com_ids(linhas):
         l["pastas"] = onde.get(l["telefone"], [])
     return {
         "total": r[0],
@@ -1782,7 +1839,7 @@ def contatos_da_pasta(pasta_id: int, busca: str = "", pagina: int = 1, por_pagin
     pagina, por_pagina = max(1, pagina), max(1, min(500, por_pagina))
     total, linhas = pastas.contatos(pasta_id, busca, pagina, por_pagina)
     onde = pastas.pastas_dos([l["telefone"] for l in linhas])
-    for l in linhas:
+    for l in _com_ids(linhas):
         l["pastas"] = onde.get(l["telefone"], [])
     return {"total": total, "pagina": pagina, "por_pagina": por_pagina, "linhas": linhas}
 
@@ -1914,6 +1971,20 @@ def marcar_nao_contatar(pedido: NaoContatar) -> dict:
     return {"adicionados": novos, "invalidos": len(brutos) - len(validos), "total": pastas.bloqueados_recentes(0)[0]}
 
 
+def telefones_dos_ids(ids: list[str], lista_id: str = "") -> dict[str, str]:
+    """{contato_id: telefone} dos ids achados nas pastas e, se dada, na lista. O id não se desfaz sem o telefone."""
+    procurados = {i.strip().lower() for i in ids if i and i.strip()}
+    achados = {i: t for t in pastas.telefones() if (i := id_do_contato(t)) in procurados}
+    faltam = procurados - achados.keys()
+    if faltam and lista_id:
+        arquivo = _parquet(lista_id)
+        achados.update(duckdb.connect().execute(
+            f"SELECT DISTINCT {_ID_SQL}, telefone FROM read_parquet('{arquivo}') WHERE telefone <> '' AND {_ID_SQL} IN (SELECT unnest(?))",
+            [SEGREDO, SEGREDO, sorted(faltam)],
+        ).fetchall())
+    return achados
+
+
 @app.delete("/api/nao-contatar")
 def desmarcar_nao_contatar(telefone: str) -> dict:
     return {"removidos": pastas.desbloquear(_e164(telefone) or telefone)}
@@ -1961,6 +2032,68 @@ def revogar_chave(chave_id: int, request: Request) -> dict:
     return {"ok": True}
 
 
+# ---------- login OAuth do MCP: a página onde o dono autoriza uma ferramenta ----------
+
+def _pagina_de_autorizacao(pedido: str, nome: str, sessao: bool, erro: str = "", status: int = 200) -> Response:
+    from html import escape
+
+    campo = "" if sessao else (
+        '<label for="senha">Senha do Garimpo</label>'
+        '<input id="senha" name="senha" type="password" autocomplete="current-password" placeholder="Senha do Garimpo" required autofocus>'
+    )
+    from string import Template
+
+    corpo = Template((AQUI / "autorizar.html").read_text()).safe_substitute(
+        nome=escape(nome), pedido=escape(pedido), campo=campo, erro=f'<div class="erro" role="alert">{escape(erro)}</div>' if erro else "",
+        acoes="" if not pedido else (
+            '<button type="submit" name="decisao" value="permitir">Permitir</button>'
+            '<button type="submit" name="decisao" value="recusar" class="sec" formnovalidate>Recusar</button>'
+        ),
+    )
+    return Response(corpo, status_code=status, media_type="text/html",
+                    headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'"})
+
+
+@app.get(mcp_garimpo.PAGINA_DE_AUTORIZACAO)
+def autorizar_mcp(pedido: str, request: Request) -> Response:
+    p = oauth.ver_pedido(pedido)
+    if not p:
+        return _pagina_de_autorizacao("", "", True, "Este pedido venceu. Volte à ferramenta e conecte de novo.", 410)
+    return _pagina_de_autorizacao(pedido, oauth.nome_do_cliente(p["client"]), _sessao_valida(request.cookies.get(COOKIE)))
+
+
+@app.post(mcp_garimpo.PAGINA_DE_AUTORIZACAO)
+async def responder_autorizacao(request: Request) -> Response:
+    form = await request.form()
+    pedido, decisao = str(form.get("pedido") or ""), str(form.get("decisao") or "")
+    p = oauth.ver_pedido(pedido)
+    if not p:
+        return _pagina_de_autorizacao("", "", True, "Este pedido venceu. Volte à ferramenta e conecte de novo.", 410)
+    nome, sessao = oauth.nome_do_cliente(p["client"]), _sessao_valida(request.cookies.get(COOKIE))
+    permitir = decisao == "permitir"
+    if permitir and not sessao:  # quem já está dentro do Garimpo só confirma; os outros digitam a senha
+        try:
+            await anyio.to_thread.run_sync(_conferir_senha, str(form.get("senha") or ""), _ip(request))
+        except HTTPException as e:
+            return _pagina_de_autorizacao(pedido, nome, False, str(e.detail), e.status_code)
+    destino = oauth.responder_pedido(pedido, permitir)
+    pastas.registrar_acesso("mcp autorizado" if permitir else "mcp recusado", _ip(request))
+    return RedirectResponse(destino, status_code=303)
+
+
+@app.get("/api/mcp/conexoes")
+def conexoes_mcp() -> list[dict]:
+    return oauth.conexoes()
+
+
+@app.delete("/api/mcp/conexoes/{conexao}")
+def revogar_conexao_mcp(conexao: str, request: Request) -> dict:
+    if not oauth.revogar_conexao(conexao):
+        raise HTTPException(404, "Conexão não encontrada ou já revogada.")
+    pastas.registrar_acesso("mcp revogado", _ip(request))
+    return {"ok": True}
+
+
 # ---------- API das automações (/api/v1) ----------
 # Mesmas respostas das rotas que a página usa, num endereço estável e que aceita chave de API.
 # Só leitura, criação de lista, criação de pasta e retirada de contatos: nada aqui apaga dados.
@@ -1968,6 +2101,7 @@ def revogar_chave(chave_id: int, request: Request) -> dict:
 class Retirada(BaseModel):
     pasta: str  # nome da pasta onde os contatos ficam marcados; é criada se não existir
     quantidade: int = 100
+    ids: list[str] | None = None  # contatos escolhidos (`contato_id`); sem isso, os próximos `quantidade`
 
 
 _trava_retirada = threading.Lock()
@@ -1977,12 +2111,19 @@ def retirar(id_: str, pedido: Retirada, f: Annotated[Filtros, Depends()]) -> dic
     """Entrega os próximos contatos da lista que ainda não estão em nenhuma pasta e já os guarda na pasta indicada.
 
     Chamar de novo traz os seguintes: quem já saiu não volta. Aceita os mesmos filtros de /contatos.
+    Com `ids`, entrega só esses contatos (os que ainda estão livres) e diz por que os outros ficaram de fora.
     """
     meta = _ler_meta(id_)
     if meta["status"] != "pronta":
         raise HTTPException(409, "A lista ainda não está pronta.")
     arquivo = _parquet(id_)
-    quantidade = max(1, min(1000, pedido.quantidade))
+    ids = None
+    if pedido.ids is not None:
+        ids = list(dict.fromkeys(i.strip().lower() for i in pedido.ids if i and i.strip()))
+        if not ids or len(ids) > 1000:
+            raise HTTPException(400, "Mande de 1 a 1.000 ids de contato por vez.")
+        f.em["ids"] = ids
+    quantidade = len(ids) if ids else max(1, min(1000, pedido.quantidade))
     with _trava_retirada:  # duas retiradas ao mesmo tempo não podem entregar o mesmo contato
         nome = " ".join(pedido.pasta.split())
         achada = next((p for p in pastas.listar() if p["nome"].casefold() == nome.casefold()), None)
@@ -1998,14 +2139,45 @@ def retirar(id_: str, pedido: Retirada, f: Annotated[Filtros, Depends()]) -> dic
         for l in linhas:
             l["publico"] = _publico(meta)
         pastas.adicionar(pasta_id, linhas, id_, _rotulo(meta))
+        f.em["ids"] = None
         cte, params = f.consulta(arquivo, "fora")
         restantes = con.execute(f"{cte} SELECT count(*) FROM r", params).fetchone()[0]
-    return {
+    saida = {
         "pasta": {"id": pasta_id, "nome": achada["nome"] if achada else nome, "criada_agora": not achada},
         "retirados": len(linhas),
         "restantes": restantes,
-        "linhas": linhas,
+        "linhas": _com_ids(linhas),
     }
+    if ids:
+        saida["nao_retirados"] = _por_que_ficou_de_fora(arquivo, set(ids) - {l["contato_id"] for l in linhas})
+    return saida
+
+
+def _por_que_ficou_de_fora(arquivo: Path, ids: set[str]) -> list[dict]:
+    """Para os ids pedidos que não saíram: já estavam numa pasta, não estão na lista ou não passam no filtro."""
+    if not ids:
+        return []
+    achados = {
+        i: t for i, t in duckdb.connect().execute(
+            f"SELECT DISTINCT {_ID_SQL} i, telefone FROM read_parquet('{arquivo}') WHERE telefone <> '' AND {_ID_SQL} IN (SELECT unnest(?))",
+            [SEGREDO, SEGREDO, sorted(ids)],
+        ).fetchall()
+    }
+    usados = pastas.pastas_dos(list(achados.values()))
+    bloqueados = set(pastas.bloqueados()) & set(achados.values())
+    saida = []
+    for i in sorted(ids):
+        t = achados.get(i)
+        if t is None:
+            motivo = "não está nesta lista"
+        elif t in bloqueados:
+            motivo = "marcado para não usar"
+        elif t in usados:
+            motivo = "já está na pasta " + ", ".join(p["nome"] for p in usados[t])
+        else:
+            motivo = "não passa nos filtros pedidos (ou não é contato de disparo)"
+        saida.append({"contato_id": i, "motivo": motivo})
+    return saida
 
 
 def inicio_da_api(request: Request) -> dict:

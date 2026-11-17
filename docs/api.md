@@ -59,6 +59,14 @@ Resposta:
 
 `quantidade` vai de 1 a 1000. Quando `retirados` vier 0, a lista acabou para aquele filtro.
 
+Para retirar contatos escolhidos, mande `"ids": ["<contato_id>", ...]` no corpo (até 1.000; `quantidade` é
+ignorada). Os que não saírem voltam em `nao_retirados`, cada um com o motivo: já está numa pasta, marcado para
+não usar, não está nesta lista ou não passa nos filtros.
+
+Cada contato de `/contatos`, `/retirar` e das pastas traz um `contato_id`: 16 letras tiradas do telefone com o
+segredo do sistema. É o mesmo em todas as listas e pastas e não revela o número, para a automação marcar
+contatos sem guardar o telefone.
+
 ## Filtros de `/contatos`, `/exportar` e `/retirar`
 
 Todos opcionais; os que aceitam vários valores se repetem na URL (`uf=MG&uf=SP`).
@@ -67,6 +75,8 @@ Todos opcionais; os que aceitam vários valores se repetem na URL (`uf=MG&uf=SP`
 |---|---|
 | `faixa` | `A` (contato forte), `B` (médio) |
 | `tipo_whatsapp` | `pessoal`, `business`; vazio = não verificado |
+| `situacao_whatsapp` | `pessoal`, `business`, `com_whatsapp` (conta sem tipo), `sem_whatsapp`, `nao_verificado` |
+| `ids` | só esses `contato_id` |
 | `situacao` | `ativa`, `baixada`, `inapta`, `suspensa`, `nula` |
 | `papel` | `dono principal`, `outro sócio` |
 | `uf`, `cidade`, `bairro`, `atividade` | como aparecem em `/listas/{id}/filtros` |
@@ -151,7 +161,12 @@ confirmado sobe, e os filtros `tipo_whatsapp=pessoal` e `tipo_whatsapp=business`
 O Garimpo também é um servidor MCP: Claude e outros agentes de IA usam o sistema por ferramentas.
 
 - **Endereço:** `https://SEU-ENDERECO/mcp` (transporte HTTP do MCP, sem estado, respostas JSON)
-- **Chave:** a mesma de `/api/v1`, no cabeçalho `Authorization: Bearer SUA_CHAVE`. Mesmo limite de 300 chamadas por minuto.
+- **Login (OAuth):** ferramentas que pedem login (Claude, ChatGPT e outras) só precisam do endereço. Elas se
+  cadastram sozinhas, abrem a página do Garimpo, você digita a senha e clica em **Permitir**. O acesso vale 7 dias
+  e se renova sozinho por até 90; abre só o `/mcp`. As ferramentas autorizadas aparecem em **Base → Chaves de API**,
+  onde dá para revogar. Descoberta: `/.well-known/oauth-protected-resource/mcp` e `/.well-known/oauth-authorization-server`.
+- **Chave fixa:** para ferramentas sem login, a mesma chave de `/api/v1`, no cabeçalho `Authorization: Bearer SUA_CHAVE`.
+- **Limite:** 300 chamadas por minuto por chave ou ferramenta autorizada.
 - **Claude Code:** `claude mcp add --transport http garimpo https://SEU-ENDERECO/mcp --header "Authorization: Bearer SUA_CHAVE"`
 
 | Ferramenta | Para quê |
@@ -166,11 +181,15 @@ O Garimpo também é um servidor MCP: Claude e outros agentes de IA usam o siste
 | `criar_lista` | Gera a lista: cidade, estado, Brasil ou palavras no nome |
 | `ver_lista`, `listar_listas` | Status e resumo |
 | `contatos_da_lista` | Contatos, com filtros, ordem e paginação (até 100 por página) |
-| `retirar_contatos` | Próximos contatos fora de pastas, já guardados numa pasta |
+| `retirar_contatos` | Próximos contatos fora de pastas (ou os `ids` escolhidos), já guardados numa pasta |
+| `verificar_whatsapp`, `ver_verificacao_whatsapp` | Confere WhatsApp e tipo da conta dos próximos contatos fora de pastas (gasta saldo da CheckLeaked; até 1.000 por pedido; `so_estimar` antes) |
+| `marcar_nao_usar` | Quem pediu para sair ou bloqueou: some de todas as listas e pastas, para sempre |
 | `avaliar_lista_com_ia`, `ver_avaliacao` | Nota de 0 a 10 da IA para cada empresa (gasta créditos de IA) |
 | `uso_da_ia` | Gasto de IA do mês e teto |
 | `listar_pastas`, `contatos_da_pasta` | Pastas e seus contatos |
 
-Ficam de fora de propósito: apagar qualquer coisa, verificar WhatsApp (gasta o saldo pago da CheckLeaked)
-e baixar PDF ou CSV (use `/api/v1` para arquivos). Um erro volta como resultado de ferramenta com a
+`contatos_da_lista` e `retirar_contatos` filtram por `whatsapp`: `pessoal`, `business`, `com_whatsapp`
+(os dois), `sem_whatsapp` ou `nao_verificado`. Cada contato traz `contato_id` (veja acima).
+
+Ficam de fora de propósito: apagar listas, pastas ou perfis, e baixar PDF ou CSV (use `/api/v1` para arquivos). Um erro volta como resultado de ferramenta com a
 mensagem do sistema, para o agente entender e corrigir o pedido.

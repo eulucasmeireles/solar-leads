@@ -202,7 +202,9 @@ function blocoExportacoes() {
 function blocoAcessos() {
   const zona = h('div', {});
   const TIPOS = { entrou: ['check', 'verde', 'Entrou'], saiu: ['esquerda', 'cinza', 'Saiu'], 'senha errada': ['alerta', 'laranja', 'Senha errada'], bloqueado: ['alerta', 'vermelho', 'Bloqueado'],
-    'chave criada': ['check', 'verde', 'Chave de API criada'], 'chave revogada': ['alerta', 'laranja', 'Chave de API revogada'] };
+    'chave criada': ['check', 'verde', 'Chave de API criada'], 'chave revogada': ['alerta', 'laranja', 'Chave de API revogada'],
+    'mcp autorizado': ['check', 'verde', 'Ferramenta autorizada no MCP'], 'mcp recusado': ['alerta', 'cinza', 'Ferramenta recusada no MCP'],
+    'mcp revogado': ['alerta', 'laranja', 'Ferramenta do MCP revogada'] };
   api('/api/acessos').then((itens) => {
     const ls = (itens || []).slice(0, 30);
     zona.replaceChildren(grupoAjustes('Acessos ao sistema', ls.length
@@ -216,7 +218,7 @@ function blocoAcessos() {
 /* ---------- Chaves de API ---------- */
 function blocoChaves() {
   const zona = h('div', {});
-  const S = { chaves: null, erro: '', mostrarRevogadas: false };
+  const S = { chaves: null, conexoes: [], erro: '', mostrarRevogadas: false };
   const origem = location.origin;
   const urlApi = origem + '/api/v1';
 
@@ -331,12 +333,29 @@ function blocoChaves() {
     det.append(h('div', { class: 'api-corpo' },
       h('p', { text: 'Agentes de IA usam o Garimpo por ferramentas: montar a busca com IA, gerar listas (cidade, estado ou Brasil), ler e retirar contatos, avaliar com IA. Nenhuma ferramenta apaga nada nem gasta o saldo de WhatsApp.' }),
       h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'Endereço do MCP' }), bloco(urlMcp, 'Endereço do MCP')),
-      h('p', {}, 'Use uma chave desta página, no cabeçalho ', h('code', { text: 'Authorization: Bearer SUA_CHAVE' }), '.'),
+      h('p', {}, h('strong', { text: 'Ferramentas com login (Claude, ChatGPT e outras): ' }), 'cole só o endereço. Ela abre uma página do Garimpo; você digita a senha e clica em Permitir. A ferramenta aparece aqui em cima, e dá para revogar quando quiser.'),
+      h('p', {}, h('strong', { text: 'Ferramentas com chave fixa: ' }), 'use uma chave desta página, no cabeçalho ', h('code', { text: 'Authorization: Bearer SUA_CHAVE' }), '.'),
       h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'No Claude Code' }),
         bloco(`claude mcp add --transport http garimpo ${urlMcp} \\\n  --header "Authorization: Bearer SUA_CHAVE"`, 'Comando do Claude Code')),
       h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'Em outros clientes (arquivo de configuração)' }), bloco(json, 'Configuração do MCP')),
       h('p', { class: 'dica', text: 'As ferramentas de IA gastam créditos da Anthropic dentro do teto do mês. Mesmo limite da API: 300 chamadas por minuto por chave.' })));
     return det;
+  }
+
+  async function revogarConexao(c) {
+    const ok = await confirmar({ titulo: 'Revogar acesso?', texto: `“${c.nome}” perde o acesso ao Garimpo na hora. Para voltar, ela terá de pedir login de novo.`, ok: 'Revogar', perigo: true });
+    if (!ok) return;
+    try { await api(`/api/mcp/conexoes/${encodeURIComponent(c.id)}`, { method: 'DELETE' }); avisar('Acesso revogado.'); }
+    catch (e) { avisar(e.message, 'erro'); }
+    carregar();
+  }
+  function linhasConexoes() {
+    if (!S.conexoes.length) return [];
+    return [h('div', { class: 'ajuste' }, h('p', { class: 'ajuste-t', text: 'Ferramentas conectadas pelo login do MCP' })),
+      ...S.conexoes.map((c) => h('div', { class: 'ajuste chave-linha' },
+        h('div', { class: 'ajuste-tx' }, h('div', { class: 'ajuste-t', text: c.nome }),
+          h('div', { class: 'ajuste-d', text: [`autorizada ${dataRelativa(c.criada_em)}`, c.ultimo_uso ? `último uso ${dataRelativa(c.ultimo_uso)}` : 'nunca usada'].join(' · ') })),
+        h('button', { class: 'btn btn-texto btn-pequeno', type: 'button', 'aria-label': `Revogar o acesso de ${c.nome}`, onclick: () => revogarConexao(c) }, 'Revogar')))];
   }
 
   function desenhar() {
@@ -358,12 +377,13 @@ function blocoChaves() {
         h('div', { class: 'ajuste' }, h('p', { class: 'ajuste-d', text: 'Para suas automações (n8n, GHL) e agentes de IA (MCP) lerem listas e retirarem contatos sem usar a senha do sistema.' })),
         linhas,
         h('div', { class: 'ajuste' }, h('button', { class: 'btn btn-prim', type: 'button', disabled: !S.chaves, onclick: dialogoCriar }, 'Criar chave')),
+        ...linhasConexoes(),
         h('div', { class: 'ajuste ajuste-bloco' }, comoUsar()),
         h('div', { class: 'ajuste ajuste-bloco' }, comoUsarMcp()))));
   }
 
   async function carregar() {
-    try { S.chaves = await api('/api/chaves'); S.erro = ''; }
+    try { S.chaves = await api('/api/chaves'); S.erro = ''; S.conexoes = await api('/api/mcp/conexoes').catch(() => []); }
     catch (e) { S.erro = e.status === 404 ? 'As chaves de API ainda não estão disponíveis neste servidor.' : e.message; }
     const abertos = [...zona.querySelectorAll('details.api-como')].map((d) => d.open);
     desenhar();

@@ -51,6 +51,13 @@ def _con() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS chaves_api (
           id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, comeco TEXT NOT NULL, hash TEXT NOT NULL UNIQUE,
           criada_em TEXT NOT NULL, ultimo_uso TEXT NOT NULL DEFAULT '', revogada_em TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS oauth_clientes (
+          client_id TEXT PRIMARY KEY, nome TEXT NOT NULL, dados TEXT NOT NULL, criado_em TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS oauth_tokens (
+          hash TEXT PRIMARY KEY, tipo TEXT NOT NULL, client_id TEXT NOT NULL, conexao TEXT NOT NULL,
+          escopos TEXT NOT NULL DEFAULT '', recurso TEXT NOT NULL DEFAULT '', expira INTEGER NOT NULL,
+          criado_em TEXT NOT NULL, ultimo_uso TEXT NOT NULL DEFAULT '', revogado_em TEXT NOT NULL DEFAULT '');
+        CREATE INDEX IF NOT EXISTS oauth_tokens_conexao ON oauth_tokens (conexao);
         CREATE TABLE IF NOT EXISTS perfis (
           id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL UNIQUE COLLATE NOCASE, receita TEXT NOT NULL,
           criado_em TEXT NOT NULL, atualizado_em TEXT NOT NULL);

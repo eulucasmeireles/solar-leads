@@ -1,12 +1,13 @@
 """Servidor MCP do Garimpo: outros sistemas (Claude, agentes de IA, n8n) usam o Garimpo por ferramentas.
 
-Fica em `/mcp`, no mesmo endereço do sistema, pelo transporte HTTP do MCP, e aceita as mesmas chaves
-de API de `/api/v1` (cabeçalho `Authorization: Bearer <chave>`). As ferramentas chamam as mesmas
-funções das rotas da v1, com as mesmas regras e mensagens.
+Fica em `/mcp`, no mesmo endereço do sistema, pelo transporte HTTP do MCP. Aceita dois jeitos de entrar:
+as chaves de API de `/api/v1` (cabeçalho `Authorization: Bearer <chave>`) e o login OAuth do MCP
+(`oauth.py`: a ferramenta abre a página do Garimpo e o dono autoriza com a senha). As ferramentas chamam
+as mesmas funções das rotas da v1, com as mesmas regras e mensagens.
 
-O que fica de fora de propósito: apagar qualquer coisa, verificar WhatsApp (gasta o saldo pago da
-CheckLeaked) e baixar PDF ou CSV (arquivos não cabem bem numa resposta de ferramenta).
-As ferramentas de IA gastam créditos da Anthropic, dentro do teto mensal do sistema.
+O que fica de fora de propósito: apagar listas, pastas ou perfis, e baixar PDF ou CSV (arquivos não cabem
+bem numa resposta de ferramenta). As ferramentas de IA gastam créditos da Anthropic, dentro do teto mensal
+do sistema; `verificar_whatsapp` gasta o saldo pago da CheckLeaked, com teto por pedido (`MAX_VERIFICAR_MCP`).
 """
 
 from __future__ import annotations
@@ -17,16 +18,23 @@ from types import ModuleType
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
+from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
+from pydantic import AnyHttpUrl
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import ToolAnnotations
 from starlette.routing import Route
 
-from .. import perfis
+from .. import oauth, perfis
 
 CAMINHO = "/mcp"
+PAGINA_DE_AUTORIZACAO = "/mcp/autorizar"
+# Abertas sem sessão: o cliente MCP as chama antes de ter acesso (a página pede a senha ela mesma).
+ROTAS_DO_LOGIN = frozenset({"/authorize", "/token", "/register", "/revoke", PAGINA_DE_AUTORIZACAO})
 ESPERA_DA_BUSCA_S = 100  # a busca com IA leva cerca de um minuto; depois disso a ferramenta devolve o id
+MAX_VERIFICAR_MCP = 1000  # números por pedido de verificação de WhatsApp (cada um gasta uma consulta do saldo)
 
 INSTRUCOES = """Garimpo acha clientes B2B no Brasil a partir da base de empresas da Receita Federal (CNPJ):
 monta listas com os donos das empresas e os telefones deles, pontuadas pelo encaixe num perfil de busca.
@@ -37,14 +45,20 @@ Caminho típico:
 2. `salvar_perfil_da_busca` (ou use um perfil de `listar_perfis`).
 3. `criar_lista` com o perfil e o lugar: uma cidade (cidade + uf), um estado (só uf) ou o Brasil (nenhum).
    A lista leva de segundos a alguns minutos; acompanhe com `ver_lista` até o status "pronta".
-4. `contatos_da_lista` para ler, ou `retirar_contatos` para pegar os próximos contatos ainda não usados
-   e já guardá-los numa pasta (quem saiu não volta nas próximas retiradas).
+4. `verificar_whatsapp` confere quais números têm WhatsApp e se a conta é pessoal ou business (gasta o saldo
+   pago de consultas; veja o custo antes com `so_estimar`). Contato não verificado não tem WhatsApp garantido.
+5. `contatos_da_lista` para ler, ou `retirar_contatos` para pegar os próximos contatos ainda não usados
+   e já guardá-los numa pasta (quem saiu não volta nas próximas retiradas). Os dois filtram por
+   `whatsapp` (ex.: ["pessoal"]). Para retirar contatos escolhidos, passe os `contato_id` em `ids`.
+6. `marcar_nao_usar` para quem pediu para sair ou bloqueou: some de todas as listas e pastas.
 Opcional: `avaliar_lista_com_ia` dá uma nota de 0 a 10 a cada empresa (gasta créditos de IA).
+Cada contato traz um `contato_id`, igual em todas as listas e pastas, para marcar sem usar o telefone.
 Os dados são pessoais (nome e telefone de donos de empresa): use só para prospecção legítima."""
 
 LEITURA = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 ESCRITA = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 PAGA = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
+DEFINITIVA = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False)
 
 _s: ModuleType  # o módulo do servidor web, ligado em `montar`
 mcp = MCPServer(
@@ -66,6 +80,25 @@ def _chamar(funcao, *args, **kwargs):
         raise
     except Exception as e:  # noqa: BLE001 - sem isso o agente só leria "Error executing tool"
         raise ToolError(f"Falha no Garimpo: {type(e).__name__}: {e}") from e
+
+
+def _situacoes(whatsapp: list[str] | None) -> list[str] | None:
+    """O filtro `whatsapp` das ferramentas: "com_whatsapp" vale para qualquer conta, pessoal ou business."""
+    if not whatsapp:
+        return None
+    validos = set(_s.SITUACOES_WHATSAPP)
+    errados = [w for w in whatsapp if w not in validos]
+    if errados:
+        raise ToolError(f"whatsapp aceita {', '.join(_s.SITUACOES_WHATSAPP)}; veio {', '.join(errados)}.")
+    saida = set(whatsapp)
+    if "com_whatsapp" in saida:
+        saida |= {"pessoal", "business"}
+    return sorted(saida)
+
+
+def _filtros(uf, cidade, encaixe_min, nota_ia_min, ordem, whatsapp=None, **mais):
+    return _s.Filtros(uf=uf, cidade=cidade, encaixe_min=encaixe_min, ia_min=nota_ia_min, ordem=ordem,
+                      situacao_whatsapp=_situacoes(whatsapp), **mais)
 
 
 def _resumo_da_lista(m: dict) -> dict[str, Any]:
@@ -216,15 +249,16 @@ def listar_listas() -> list[dict[str, Any]]:
 def contatos_da_lista(
     lista_id: str, pagina: int = 1, por_pagina: int = 50, ordem: str = "relevancia", busca: str = "",
     uf: list[str] | None = None, cidade: list[str] | None = None, encaixe_min: int | None = None, nota_ia_min: int | None = None,
-    so_com_email: bool = False, fora_de_pastas: bool = False,
+    so_com_email: bool = False, fora_de_pastas: bool = False, whatsapp: list[str] | None = None, ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Contatos de uma lista pronta, já sem repetidos, na ordem pedida.
+    """Contatos de uma lista pronta, já sem repetidos, na ordem pedida. Cada um traz `contato_id`.
 
     `ordem`: "relevancia", "encaixe", "ia" (nota da IA), "chance" (chance de ser o dono) ou "nome".
-    `fora_de_pastas`: só quem ainda não está em nenhuma pasta. `por_pagina`: até 100.
+    `whatsapp`: "pessoal", "business", "com_whatsapp" (qualquer um dos dois), "sem_whatsapp" ou "nao_verificado".
+    `fora_de_pastas`: só quem ainda não está em nenhuma pasta. `ids`: só esses contatos. `por_pagina`: até 100.
     """
-    f = _s.Filtros(uf=uf, cidade=cidade, encaixe_min=encaixe_min, ia_min=nota_ia_min, com_email=int(so_com_email),
-                   busca=busca, ordem=ordem, pasta="fora" if fora_de_pastas else None)
+    f = _filtros(uf, cidade, encaixe_min, nota_ia_min, ordem, whatsapp, com_email=int(so_com_email), busca=busca,
+                 pasta="fora" if fora_de_pastas else None, ids=[i.strip().lower() for i in ids] if ids else None)
     return _chamar(_s.contatos, lista_id, f, pagina=pagina, por_pagina=max(1, min(100, por_pagina)))
 
 
@@ -232,11 +266,74 @@ def contatos_da_lista(
 def retirar_contatos(
     lista_id: str, pasta: str, quantidade: int = 100, ordem: str = "relevancia",
     uf: list[str] | None = None, cidade: list[str] | None = None, encaixe_min: int | None = None, nota_ia_min: int | None = None,
+    whatsapp: list[str] | None = None, ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Entrega os próximos contatos da lista que ainda não estão em nenhuma pasta e já os guarda na pasta indicada
-    (criada se não existir). Chamar de novo traz os seguintes: quem já saiu não volta. Até 1.000 por vez."""
-    f = _s.Filtros(uf=uf, cidade=cidade, encaixe_min=encaixe_min, ia_min=nota_ia_min, ordem=ordem)
-    return _chamar(_s.retirar, lista_id, _s.Retirada(pasta=pasta, quantidade=quantidade), f)
+    (criada se não existir). Chamar de novo traz os seguintes: quem já saiu não volta. Até 1.000 por vez.
+
+    `whatsapp`: mesmo filtro de `contatos_da_lista` (ex.: ["pessoal"] para só WhatsApp pessoal confirmado).
+    `ids`: retira só esses `contato_id` (até 1.000; `quantidade` é ignorada); os que não saírem voltam em
+    `nao_retirados`, com o motivo (já numa pasta, marcado para não usar, fora da lista ou do filtro).
+    """
+    f = _filtros(uf, cidade, encaixe_min, nota_ia_min, ordem, whatsapp)
+    return _chamar(_s.retirar, lista_id, _s.Retirada(pasta=pasta, quantidade=quantidade, ids=ids), f)
+
+
+# ---------- WhatsApp e não usar ----------
+
+@mcp.tool(annotations=PAGA)
+def verificar_whatsapp(
+    lista_id: str, quantidade: int = 200, so_estimar: bool = False, ordem: str = "relevancia",
+    uf: list[str] | None = None, cidade: list[str] | None = None, encaixe_min: int | None = None, nota_ia_min: int | None = None,
+) -> dict[str, Any]:
+    """Confere pela CheckLeaked se os números têm WhatsApp e se a conta é pessoal ou business.
+
+    Pega os próximos contatos da lista ainda não verificados e fora de pastas, na `ordem` e nos filtros pedidos.
+    Cada número novo gasta 1 consulta do saldo pago (mesmo sem WhatsApp); quem já foi verificado nos últimos
+    30 dias não gasta. Até 1.000 números por pedido, um pedido por vez no sistema.
+    `so_estimar`: só diz quantos números entram, quantas consultas gastariam e o saldo, sem verificar.
+    Roda em segundo plano (~3 s por número, 4 ao mesmo tempo): acompanhe com `ver_verificacao_whatsapp`.
+    No fim a lista é atualizada sozinha; depois disso filtre por `whatsapp` em `contatos_da_lista` ou `retirar_contatos`.
+    """
+    meta = _chamar(_s.uma_lista, lista_id)
+    f = _filtros(uf, cidade, encaixe_min, nota_ia_min, ordem)
+    n = max(1, min(MAX_VERIFICAR_MCP, quantidade))
+    escolher = lambda: _s._numeros_da_lista(meta, n, f)  # noqa: E731
+    if so_estimar:
+        return _chamar(lambda: _s._estimar_verificacao(escolher()))
+    r = _chamar(_s.comecar_verificacao, meta, escolher)
+    return {"iniciada": True, "numeros": r["numeros"], "acompanhe_com": "ver_verificacao_whatsapp"}
+
+
+@mcp.tool(annotations=LEITURA)
+def ver_verificacao_whatsapp() -> dict[str, Any]:
+    """Andamento da verificação de WhatsApp, o resumo quando termina, o saldo de consultas e se a lista
+    já foi atualizada com os resultados (`lista_atualizando` falso = pode filtrar por `whatsapp`)."""
+    estado = _chamar(_s.estado_whatsapp)
+    v = dict(estado["verificacao"])
+    if v.get("lista_id"):
+        with contextlib.suppress(Exception):
+            m = _s.uma_lista(v["lista_id"])
+            v["lista_atualizando"] = bool(m.get("atualizando")) or m.get("status") != "pronta"
+    v["saldo"] = (estado.get("servico") or {}).get("saldo")
+    v["totais"] = estado.get("totais")
+    return v
+
+
+@mcp.tool(annotations=DEFINITIVA)
+def marcar_nao_usar(contato_ids: list[str], motivo: str = "", lista_id: str = "") -> dict[str, Any]:
+    """Marca contatos para nunca mais serem usados: quem pediu para sair, bloqueou ou reclamou.
+
+    O contato some de todas as listas, consultas, retiradas e exportações, e sai de todas as pastas em que estiver.
+    `contato_ids`: os `contato_id` (até 1.000). `lista_id`: a lista de onde vieram, se não estiverem em pasta.
+    `motivo`: curto, ex. "bloqueou", "pediu para sair". Desfazer só pela pessoa dona do Garimpo.
+    """
+    if not contato_ids or len(contato_ids) > 1000:
+        raise ToolError("Mande de 1 a 1.000 contato_id por vez.")
+    achados = _chamar(_s.telefones_dos_ids, contato_ids, lista_id)
+    novos = _chamar(_s.pastas.bloquear, sorted(set(achados.values())), " ".join(motivo.split())[:120] or "MCP")
+    pedidos = {i.strip().lower() for i in contato_ids if i and i.strip()}
+    return {"marcados": len(achados), "novos": novos, "nao_achados": sorted(pedidos - achados.keys())}
 
 
 # ---------- avaliação com IA ----------
@@ -309,4 +406,19 @@ def montar(app: FastAPI, servidor: ModuleType) -> None:
             yield estado
 
     app.router.lifespan_context = vida
-    app.router.routes.insert(0, Route(CAMINHO, endpoint=_Transporte(), methods=["GET", "POST", "DELETE"]))
+
+    # Login OAuth do MCP (descoberta, cadastro do cliente, autorização, troca do código, revogação).
+    base = servidor.URL_PUBLICA
+    provedor = oauth.Provedor(lambda pedido: f"{base}{PAGINA_DE_AUTORIZACAO}?pedido={pedido}")
+    rotas = create_auth_routes(
+        provedor, issuer_url=AnyHttpUrl(base),
+        client_registration_options=ClientRegistrationOptions(enabled=True),
+        revocation_options=RevocationOptions(enabled=True),
+    )
+    recurso = create_protected_resource_routes(
+        resource_url=AnyHttpUrl(f"{base}{CAMINHO}"), authorization_servers=[AnyHttpUrl(base)], resource_name="Garimpo",
+    )
+    # Há clientes que procuram os dados do recurso na raiz, sem o "/mcp" no fim.
+    raiz = Route("/.well-known/oauth-protected-resource", endpoint=recurso[0].endpoint, methods=["GET", "OPTIONS"])
+    for rota in [Route(CAMINHO, endpoint=_Transporte(), methods=["GET", "POST", "DELETE"]), *rotas, *recurso, raiz]:
+        app.router.routes.insert(0, rota)

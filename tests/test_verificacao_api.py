@@ -181,3 +181,43 @@ def test_ao_refazer_o_motivo_fica_e_a_etapa_muda(lista, monkeypatch):
 def test_verificacao_sem_chave_recusa(logado, lista, monkeypatch):
     monkeypatch.setenv("CHECKLEAKED_KEY", "")
     assert logado.post("/api/whatsapp/verificacao", json={"lista_id": lista}).status_code == 409
+
+
+# ---------- pelo MCP ----------
+
+def _mcp(nome: str, argumentos: dict):
+    import anyio
+    from mcp import Client
+
+    from solar_leads.web import mcp_garimpo
+
+    async def rodar():
+        async with Client(mcp_garimpo.mcp) as c:
+            return await c.call_tool(nome, argumentos)
+
+    return anyio.run(rodar)
+
+
+def test_mcp_estima_e_verifica_so_quem_esta_fora_de_pastas(lista, monkeypatch, servico_falso):
+    from solar_leads import pastas
+
+    refeitas = []
+    monkeypatch.setattr(servidor, "_refazer", lambda id_, motivo: refeitas.append(id_))
+    pasta = pastas.criar("Ja usados")
+    pastas.adicionar(pasta, [{"telefone": "+55" + numeros(1)[0], "primeiro_nome": "Pessoa0"}], lista, "Montes Claros")
+    try:
+        r = _mcp("verificar_whatsapp", {"lista_id": lista, "quantidade": 3, "so_estimar": True})
+        assert not r.is_error, r.content[0].text
+        assert (r.structured_content["numeros"], r.structured_content["consultas"]) == (3, 3)
+        assert servico_falso["consultados"] == []
+        r = _mcp("verificar_whatsapp", {"lista_id": lista, "quantidade": 5000})
+        assert r.structured_content["numeros"] == 7  # 8 da lista menos o que já está numa pasta; teto de 1.000
+        for _ in range(100):
+            if not servidor._verificando():
+                break
+            time.sleep(0.05)
+        estado = _mcp("ver_verificacao_whatsapp", {}).structured_content
+        assert estado["rodando"] is False and estado["resumo"]["consultas"] == 7 and refeitas == [lista]
+        assert numeros(1)[0] not in cadastro(numeros(8))
+    finally:
+        pastas.remover(pasta, ["+55" + numeros(1)[0]])
