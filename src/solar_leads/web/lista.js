@@ -226,15 +226,18 @@ async function montarLista(raiz, meta, abaInicial, qs) {
   if (meta.aviso) raiz.append(h('div', { class: 'nota nota-laranja', role: 'note' }, icone('info', 18), h('span', { text: meta.aviso })));
   /* a lista está sendo refeita (WhatsApp verificados, notas da IA): segue aberta e recarrega quando terminar */
   if (meta.atualizando) {
-    const texto = h('span', { text: `${meta.atualizando}…` });
-    raiz.append(h('div', { class: 'nota nota-atualizando', role: 'status' }, h('i', { class: 'giro', 'aria-hidden': 'true' }), texto));
+    const etapa = (m) => (m.atualizando_etapa ? `Etapa: ${m.atualizando_etapa}.` : '');
+    const texto = h('span', { class: 'atualizando-etapa', text: etapa(meta) });
+    raiz.append(h('div', { class: 'nota nota-atualizando', role: 'status' }, h('i', { class: 'giro', 'aria-hidden': 'true' }),
+      h('div', {}, h('strong', { text: `${meta.atualizando}…` }),
+        h('p', { text: `Os números abaixo ainda são os de antes. A tela se atualiza sozinha quando terminar${listaAmpla(meta) ? ' (numa lista grande, leva alguns minutos)' : ''}.` }), texto)));
     let vivo = true, t = null;
     const vigiar = async () => {
       try {
         const m = await api(`/api/listas/${idUrl}`);
         if (!vivo) return;
         if (!m.atualizando) { avisar('Lista atualizada.'); rotear(); return; }
-        texto.textContent = `${m.atualizando}…`;
+        texto.textContent = etapa(m);
       } catch (e) { /* tenta de novo */ }
       if (vivo) t = setTimeout(vigiar, 3000);
     };

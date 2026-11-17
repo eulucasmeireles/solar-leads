@@ -89,7 +89,7 @@ CABECALHOS = [c[1] for c in CAMPOS]
 INTERNAS = ["dono_chave", "ordem", "cnae"]
 INTEIRAS = ("ordem", "aptidao_solar", "chance_dono", "potencial_casa", "potencial_empresa", "encaixe", "nota_ia")
 # Versão do formato das listas gravadas. 2: encaixe no perfil, nota da IA e código da atividade.
-VERSAO = 2
+VERSAO = 3  # 2: perfis, encaixe e nota da IA; 3: cada e-mail num contato só
 
 PORTE = {"01": "Microempresa", "03": "Pequeno porte", "05": "Médio ou grande"}
 
@@ -174,6 +174,28 @@ def sem_repetidos(linhas: list[dict]) -> list[dict]:
     return saida
 
 
+def email_uma_vez(linhas: list[dict], disparo: list[dict]) -> int:
+    """Cada e-mail fica só no melhor contato que o tem; nos outros, sai e o tipo vira "repetido".
+
+    O e-mail vem do cadastro da empresa na Receita e vai igual para cada sócio: sem isso, a mesma caixa
+    recebe o disparo várias vezes e o GHL junta sócios diferentes num contato só ao importar.
+    Os contatos de disparo vêm primeiro, na ordem da lista; depois as demais linhas. Devolve quantos saíram.
+    """
+    do_disparo = {id(l) for l in disparo}
+    vistos: set[str] = set()
+    tirados = 0
+    for l in [*disparo, *(l for l in linhas if id(l) not in do_disparo)]:
+        email = (l.get("email") or "").strip().lower()
+        if not email:
+            continue
+        if email in vistos:
+            l["email"], l["tipo_email"] = "", "repetido"
+            tirados += 1
+        else:
+            vistos.add(email)
+    return tirados
+
+
 def montar(
     leads: list[dict],
     cidade: str,
@@ -206,6 +228,7 @@ def montar(
     aplicar_notas_da_ia(linhas, notas)
     ordenar(linhas, cidade, publico)
     disparo = sem_repetidos([l for l in linhas if l["faixa"] in ("A", "B") and l["telefone"]])
+    email_uma_vez(linhas, disparo)
     return linhas, disparo
 
 
@@ -266,25 +289,33 @@ def trocar_notas_da_ia(arquivo: Path | str, notas: dict[str, tuple[int, str]]) -
 
 
 def migrar(arquivo: Path | str, publico: str, pesos: dict[str, int] | None = None) -> bool:
-    """Leva uma lista gravada antes dos perfis ao formato atual, sem mudar a ordem.
+    """Leva uma lista gravada ao formato atual, sem mudar a ordem nem os contatos.
 
+    Antes dos perfis: acrescenta encaixe e nota da IA. Antes da versão 3: deixa cada e-mail num contato só.
     Guarda antes uma cópia em `antes-garimpo/`, ao lado da lista. Devolve se mudou algo.
     """
     arquivo = Path(arquivo)
     colunas = {d[0] for d in duckdb.connect().execute(f"SELECT * FROM read_parquet('{arquivo}') LIMIT 0").description}
-    if set(CHAVES + INTERNAS) <= colunas:
+    linhas = ler_parquet(arquivo)
+    mudou = False
+    if not set(CHAVES + INTERNAS) <= colunas:
+        pontuar_encaixe(linhas, publico, pesos)
+        for l in linhas:
+            l.setdefault("nota_ia", None)
+            l.setdefault("motivo_ia", "")
+            l.setdefault("cnae", "")
+        mudou = True
+    disparo = sem_repetidos([l for l in linhas if l["faixa"] in ("A", "B") and l["telefone"]])
+    mudou = bool(email_uma_vez(linhas, disparo)) or mudou
+    if not mudou:
         return False
     copia = arquivo.parent / "antes-garimpo" / arquivo.name
     copia.parent.mkdir(exist_ok=True)
     if not copia.exists():
         shutil.copy2(arquivo, copia)
-    linhas = ler_parquet(arquivo)
-    pontuar_encaixe(linhas, publico, pesos)
-    for l in linhas:
-        l.setdefault("nota_ia", None)
-        l.setdefault("motivo_ia", "")
-        l.setdefault("cnae", "")
-    salvar_parquet(linhas, arquivo)
+    provisorio = arquivo.with_suffix(".migrando.parquet")
+    salvar_parquet(linhas, provisorio)
+    provisorio.replace(arquivo)  # quem estiver lendo a lista não pega o arquivo pela metade
     return True
 
 
@@ -304,6 +335,7 @@ def resumir(linhas: list[dict], disparo: list[dict], *, lugares: int = 0, whatsa
         "faixa_C_fora_do_disparo": sum(1 for l in linhas if l["faixa"] == "C"),
         "repetidos_removidos": sum(1 for l in linhas if l["faixa"] in ("A", "B") and l["telefone"]) - len(disparo),
         "contatos_para_disparo": len(disparo),
+        "emails_repetidos_tirados": sum(1 for l in disparo if l.get("tipo_email") == "repetido"),
         "faixa_A": sum(1 for l in disparo if l["faixa"] == "A"),
         "faixa_B": sum(1 for l in disparo if l["faixa"] == "B"),
         "com_nome": sum(1 for l in disparo if l["primeiro_nome"]),

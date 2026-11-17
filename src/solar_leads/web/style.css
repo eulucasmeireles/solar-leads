@@ -294,7 +294,11 @@ input:focus-visible, select:focus-visible { outline: 0; border-color: var(--acen
 .dialogo-largo .segmentado { align-self: center; }
 .verif-conta { font-size: 14px; line-height: 1.5; color: var(--txt2); min-height: 42px; }
 .verif-conta strong { color: var(--txt); font-weight: 600; }
-.nota-atualizando { display: flex; align-items: center; gap: 10px; }
+.nota-atualizando { display: flex; align-items: flex-start; gap: 10px; }
+.nota-atualizando .giro { margin-top: 3px; flex: none; }
+.nota-atualizando p { margin: 2px 0 0; }
+.nota-atualizando .atualizando-etapa { display: block; margin-top: 2px; font-size: 13px; opacity: .75; }
+.nota-atualizando .atualizando-etapa:empty { display: none; }
 
 /* avaliação pela IA */
 .dialogo-avaliar { width: min(560px, 100%); text-align: left; max-height: 90vh; overflow-y: auto; }

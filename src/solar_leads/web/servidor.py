@@ -309,13 +309,14 @@ def _parquet(id_: str) -> Path:
 
 
 def _migrar(meta: dict, arquivo: Path) -> None:
-    """Lista gravada antes dos perfis: acrescenta encaixe e nota da IA uma vez, sem mudar a ordem."""
+    """Lista gravada numa versão antiga: leva ao formato atual uma vez, sem mudar a ordem (ver `pipeline.migrar`)."""
     with _migrando:
         meta = _ler_meta(meta["id"])
         if meta.get("versao", 1) >= pipeline.VERSAO:
             return
         perfil = perfis.do_meta(meta)
-        pipeline.migrar(arquivo, _publico(meta), perfis.pesos(perfil, meta.get("atividades")))
+        if pipeline.migrar(arquivo, _publico(meta), perfis.pesos(perfil, meta.get("atividades"))) and meta.get("resumo"):
+            _contar_para_o_cartao(meta)  # "com e-mail" muda quando o e-mail repetido sai
         meta.update(versao=pipeline.VERSAO, perfil=perfil)
         _gravar_meta(meta)
 
@@ -333,7 +334,7 @@ for _arq in LISTAS.glob("*.json"):
         _m.update(status="erro", erro="A geração foi interrompida. Gere a lista de novo.")
         _gravar_meta(_m)
     elif _m.get("atualizando"):  # atualização interrompida: a lista de antes continua valendo
-        _m.update(atualizando=None)
+        _m.update(atualizando=None, atualizando_etapa=None)
         _gravar_meta(_m)
 for _arq in LISTAS.glob("*.novo.parquet"):
     _arq.unlink(missing_ok=True)
@@ -588,6 +589,10 @@ def iniciar_verificacao(pedido: PedidoVerificacao) -> dict:
             _verificacao["mensagem"] = _frase_da_verificacao(r)
             if r["com_whatsapp"] or r["sem_whatsapp"]:
                 _refazer(meta["id"], "Atualizando a lista com os WhatsApp verificados")
+                _verificacao["mensagem"] += (
+                    " A lista está sendo atualizada com esses resultados"
+                    + (": numa lista grande como esta, leva alguns minutos." if _amplo(meta) else ".")
+                )
         except Exception as e:  # noqa: BLE001 - o motivo aparece na tela
             _verificacao["mensagem"] = f"Parou com erro: {type(e).__name__}: {e}"
         _cache.pop("totais-whatsapp", None)
@@ -684,7 +689,7 @@ def _codigo_do_municipio(meta: dict) -> str:
 
 def _refazer(id_: str, motivo: str) -> None:
     """Refaz uma lista pronta com os mesmos parâmetros (WhatsApp novos, notas da IA). Ela segue aberta enquanto isso."""
-    meta = _mexer_meta(id_, atualizando=motivo)
+    meta = _mexer_meta(id_, atualizando=motivo, atualizando_etapa="Começando")
     _fila.put((meta, _codigo_do_municipio(meta), True))
 
 
@@ -765,14 +770,14 @@ def _gerar_de_novo(meta: dict, codigo: str) -> None:
                 cnaes=[a["codigo"] for a in meta["atividades"]] or [""],
                 so_ativas=p["so_ativas"], incluir_mei=p["incluir_mei"], so_locais=p.get("so_locais", True),
                 palavras=meta.get("palavras") or None, solar=_publico(meta) == "dono",
-                progresso=lambda texto: _mexer_meta(id_, atualizando=texto),
+                progresso=lambda texto: _mexer_meta(id_, atualizando_etapa=texto),
                 idade_min=p.get("idade_min", 0), portes=p.get("portes", []),
             )
             celulares = [t["tel"] for l in leads for t in l["telefones"] if t["faixa"] != "C"]
             tem_whatsapp = whatsapp.do_cache(con, celulares)
         finally:
             con.close()
-        _mexer_meta(id_, atualizando="Montando a lista")
+        _mexer_meta(id_, atualizando_etapa="Montando a lista")
         meta = _ler_meta(id_)  # as notas da IA podem ter mudado enquanto isso
         linhas, disparo = pipeline.montar(
             leads, "" if amplo else meta["cidade"], tem_whatsapp, publico=_publico(meta),
@@ -787,11 +792,11 @@ def _gerar_de_novo(meta: dict, codigo: str) -> None:
             meta = _ler_meta(id_)
             meta["resumo"] = pipeline.resumir(linhas, disparo, whatsapp_verificado=bool(tem_whatsapp))
             _contar_para_o_cartao(meta)
-            meta.update(atualizando=None, versao=pipeline.VERSAO, codigo=codigo)
+            meta.update(atualizando=None, atualizando_etapa=None, versao=pipeline.VERSAO, codigo=codigo)
             _gravar_meta(meta)
     except Exception as e:  # noqa: BLE001 - a lista antiga continua valendo; o motivo vai para a tela
         try:
-            _mexer_meta(id_, atualizando=None, aviso=f"Não deu para atualizar a lista: {type(e).__name__}: {e}")
+            _mexer_meta(id_, atualizando=None, atualizando_etapa=None, aviso=f"Não deu para atualizar a lista: {type(e).__name__}: {e}")
         except HTTPException:
             pass  # a lista foi excluída no meio
 

@@ -79,6 +79,10 @@ Todos opcionais; os que aceitam vários valores se repetem na URL (`uf=MG&uf=SP`
 
 `/contatos` responde `{"total", "pagina", "por_pagina", "resumo", "linhas": [...]}`.
 
+Cada e-mail aparece num contato só: o e-mail vem do cadastro da empresa e seria igual para todos os sócios.
+Ele fica com o melhor contato (na ordem da lista) e, nos outros, `email` vem vazio e `tipo_email` vem
+`repetido`. Assim a mesma caixa não recebe o disparo duas vezes e o GHL não junta sócios diferentes num contato só.
+
 ## Gerar uma lista
 
 Por cidade:

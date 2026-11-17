@@ -155,7 +155,27 @@ def test_verificacao_pela_tela_consulta_e_pede_para_refazer_a_lista(logado, list
     estado = logado.get("/api/whatsapp").json()["verificacao"]
     assert estado["rodando"] is False and estado["resumo"]["consultas"] == 6
     assert "6 com WhatsApp (5 pessoais, 1 comerciais)" in estado["mensagem"]
+    assert "A lista está sendo atualizada" in estado["mensagem"]
     assert refeitas == [lista]
+
+
+def test_ao_refazer_o_motivo_fica_e_a_etapa_muda(lista, monkeypatch):
+    vistos = []
+
+    def enriquecer_falso(con, lugares, codigo, uf, **k):
+        k["progresso"]("Carregando as empresas da cidade")
+        m = servidor._ler_meta(lista)
+        vistos.append((m["atualizando"], m["atualizando_etapa"]))
+        return []
+
+    monkeypatch.setattr(servidor.enriquecer, "enriquecer", enriquecer_falso)
+    monkeypatch.setattr(servidor.cnpj_db, "conectar", lambda **k: type("C", (), {"close": lambda self: None})())
+    monkeypatch.setattr(servidor.whatsapp, "do_cache", lambda con, tels: {})
+    meta = servidor._mexer_meta(lista, atualizando="Atualizando a lista com os WhatsApp verificados", atualizando_etapa="Começando")
+    servidor._gerar_de_novo(meta, "0001")
+    assert vistos == [("Atualizando a lista com os WhatsApp verificados", "Carregando as empresas da cidade")]
+    fim = servidor._ler_meta(lista)
+    assert fim["atualizando"] is None and fim["atualizando_etapa"] is None and not fim.get("aviso")
 
 
 def test_verificacao_sem_chave_recusa(logado, lista, monkeypatch):
