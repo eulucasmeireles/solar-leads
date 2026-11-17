@@ -4,6 +4,17 @@
 const PESOS = [{ valor: '3', rotulo: 'Ideal' }, { valor: '2', rotulo: 'Bom' }, { valor: '1', rotulo: 'Aceita' }];
 const PORTES_BUSCA = [['01', 'Micro'], ['03', 'Pequeno'], ['05', 'Médio ou grande']];
 const IDADES = [0, 1, 2, 3, 5, 10];
+const ONDE = [{ valor: 'cidade', rotulo: 'Uma cidade' }, { valor: 'estado', rotulo: 'Um estado' }, { valor: 'brasil', rotulo: 'Brasil todo' }];
+
+/* seletor de estado (UF); com `brasil`, a primeira opção é "Brasil todo" */
+function seletorUF({ valor = '', brasil = false, aoMudar }) {
+  const sel = h('select', { id: uid('uf'), 'aria-label': 'Estado' }, brasil ? h('option', { value: '', text: 'Brasil todo' }) : h('option', { value: '', text: 'Escolha o estado', disabled: true }));
+  (ufsCache ? Promise.resolve(ufsCache) : api('/api/ufs')).then((u) => { ufsCache = u; sel.append(...u.map((x) => h('option', { value: x, text: x }))); sel.value = valor; }).catch(() => {});
+  sel.addEventListener('change', () => aoMudar(sel.value));
+  return sel;
+}
+const textoOnde = (onde, cidade, uf) => (onde === 'cidade' && cidade ? `em ${titleCase(cidade.nome)}` : onde === 'estado' && uf ? `em ${uf}` : onde === 'brasil' ? 'no Brasil' : '');
+
 const usd = (v) => `US$ ${Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /* caixa de descrição do Início: manda o texto para a IA e abre a folha da proposta */
@@ -68,14 +79,29 @@ function folhaProposta(buscaId, texto) {
     titulo.textContent = 'Sua busca';
     sub.textContent = p.oferta || sub.textContent;
     const P = {
-      nome: p.nome, cidade: p.cidade, atividades: p.atividades.map((a) => ({ ...a, marcada: true })), palavras: p.palavras || [],
+      nome: p.nome, cidade: p.cidade, uf: p.cidade ? p.cidade.uf : (p.uf || ''),
+      onde: p.cidade ? 'cidade' : p.uf ? 'estado' : 'brasil', atividades: p.atividades.map((a) => ({ ...a, marcada: true })), palavras: p.palavras || [],
       filtros: { ...p.filtros }, criterio: p.criterio_ia || '', contagem: 0,
     };
     const nome = h('input', { type: 'text', id: uid('nome'), maxlength: '80', value: P.nome, 'aria-label': 'Nome do perfil' });
     nome.addEventListener('input', () => { P.nome = nome.value; });
 
-    /* cidade: a que a IA achou, ou escolher */
+    /* onde procurar: a cidade que a IA achou, um estado inteiro ou o Brasil todo */
     const zonaCidade = h('div', {});
+    const zonaUF = h('div', { class: 'campo' }, h('label', { text: 'Estado' }), seletorUF({ valor: P.uf, aoMudar: (v) => { P.uf = v; recontar(); } }));
+    zonaUF.querySelector('label').htmlFor = zonaUF.querySelector('select').id;
+    const dicaOnde = h('p', { class: 'dica' });
+    function desenharOnde() {
+      zonaCidade.hidden = P.onde !== 'cidade'; zonaUF.hidden = P.onde !== 'estado';
+      dicaOnde.textContent = P.onde === 'brasil' ? 'Entram as empresas dessas atividades no país inteiro. Listas muito grandes são recusadas: aí escolha um estado.'
+        : P.onde === 'estado' ? 'Entram as empresas dessas atividades em todas as cidades do estado.' : '';
+      dicaOnde.hidden = P.onde === 'cidade';
+    }
+    const segOnde = segmentado({ opcoes: ONDE, valor: P.onde, rotulo: 'Onde procurar', papel: 'radio', aoMudar: (v) => {
+      P.onde = v; desenharOnde();
+      if (v === 'cidade' && !P.cidade) desenharCidade(true);
+      recontar();
+    } });
     function desenharCidade(editando) {
       if (P.cidade && !editando) {
         zonaCidade.replaceChildren(h('div', { class: 'proposta-cidade' }, icone('pin', 18), h('strong', { text: `${titleCase(P.cidade.nome)}` }), h('span', { class: 'uf', text: P.cidade.uf }),
@@ -89,10 +115,11 @@ function folhaProposta(buscaId, texto) {
         render: (c) => [h('span', { class: 'ci-nome', text: titleCase(c.nome) }), h('span', { class: 'ci-n', text: `${c.uf} · ${num(c.empresas)} empresas` })],
         aoEscolher: (c) => { P.cidade = { nome: titleCase(c.nome), uf: c.uf, empresas: c.empresas }; desenharCidade(false); recontar(); },
       });
-      zonaCidade.replaceChildren(combo.el, P.cidade ? null : h('p', { class: 'dica', text: 'A descrição não citou uma cidade. Escolha onde procurar.' }));
+      zonaCidade.replaceChildren(combo.el);
       setTimeout(() => combo.input.focus(), 30);
     }
-    desenharCidade(false);
+    if (P.cidade) desenharCidade(false);
+    desenharOnde();
 
     /* atividades: marcar, peso e contagem */
     const total = h('div', { class: 'prev-total', 'aria-live': 'polite' });
@@ -148,22 +175,22 @@ function folhaProposta(buscaId, texto) {
       if (!marcadas.length) { total.replaceChildren(h('span', { text: 'Marque ao menos uma atividade.' })); return; }
       try {
         const r = await api('/api/perfis/contar', { method: 'POST', corpo: {
-          cidade: P.cidade ? P.cidade.nome : '', uf: P.cidade ? P.cidade.uf : '', codigos: marcadas.map((a) => a.codigo),
+          cidade: P.onde === 'cidade' && P.cidade ? P.cidade.nome : '', uf: P.onde === 'cidade' && P.cidade ? P.cidade.uf : P.onde === 'estado' ? P.uf : '', codigos: marcadas.map((a) => a.codigo),
           so_ativas: P.filtros.so_ativas, incluir_mei: P.filtros.incluir_mei, idade_min: P.filtros.idade_min || 0, portes: P.filtros.portes || [],
         } });
         if (meu !== pedido) return;
         const n = Object.fromEntries((r.por_atividade || []).map((x) => [x.codigo, x.empresas]));
         P.atividades.forEach((a) => { a.empresas = n[a.codigo] || 0; if (a.nEl) a.nEl.textContent = num(a.empresas); });
         P.contagem = r.total || 0;
-        total.replaceChildren(h('strong', { text: num(P.contagem) }), h('span', { text: `${P.contagem === 1 ? 'empresa' : 'empresas'} ${P.cidade ? 'em ' + titleCase(P.cidade.nome) : 'no Brasil'}` }));
+        total.replaceChildren(h('strong', { text: num(P.contagem) }), h('span', { text: `${P.contagem === 1 ? 'empresa' : 'empresas'} ${textoOnde(P.onde, P.cidade, P.uf)}` }));
       } catch (e) { if (meu === pedido) total.replaceChildren(h('span', { text: e.message })); }
     }, 350);
-    total.replaceChildren(h('strong', { text: num(p.total) }), h('span', { text: `${p.total === 1 ? 'empresa' : 'empresas'} ${P.cidade ? 'em ' + titleCase(P.cidade.nome) : 'no Brasil'}` }));
+    total.replaceChildren(h('strong', { text: num(p.total) }), h('span', { text: `${p.total === 1 ? 'empresa' : 'empresas'} ${textoOnde(P.onde, P.cidade, P.uf)}` }));
 
     corpo.replaceChildren(
       p.explicacao ? h('div', { class: 'nota nota-ia' }, icone('sparkle', 18), h('p', { text: p.explicacao })) : null,
-      h('section', { class: 'folha-sec' }, h('h3', { text: 'Nome do perfil' }), nome, h('p', { class: 'dica', text: 'O perfil fica salvo para gerar a mesma busca em outras cidades.' })),
-      h('section', { class: 'folha-sec' }, h('h3', { text: 'Cidade' }), zonaCidade),
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Nome do perfil' }), nome, h('p', { class: 'dica', text: 'O perfil fica salvo para gerar a mesma busca em outras cidades ou estados.' })),
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Onde procurar' }), segOnde.el, zonaCidade, zonaUF, dicaOnde),
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Atividades' }), total, ulAtiv, maisAtiv.el,
         h('p', { class: 'dica', text: 'O peso entra na nota de encaixe de cada empresa: as “ideais” vêm primeiro na lista.' })),
       h('section', { class: 'folha-sec' }, h('h3', { text: 'Filtros' }),
@@ -177,7 +204,8 @@ function folhaProposta(buscaId, texto) {
     gerar.addEventListener('click', async () => {
       erro.textContent = '';
       const marcadas = P.atividades.filter((a) => a.marcada);
-      if (!P.cidade) { erro.textContent = 'Escolha a cidade.'; return; }
+      if (P.onde === 'cidade' && !P.cidade) { erro.textContent = 'Escolha a cidade.'; return; }
+      if (P.onde === 'estado' && !P.uf) { erro.textContent = 'Escolha o estado.'; return; }
       if (!marcadas.length && !P.palavras.length) { erro.textContent = 'Marque ao menos uma atividade.'; return; }
       if (!P.nome.trim()) { erro.textContent = 'Dê um nome ao perfil.'; nome.focus(); return; }
       gerar.disabled = true; gerar.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Gerando…');
@@ -187,7 +215,8 @@ function folhaProposta(buscaId, texto) {
           atividades: marcadas.map((a) => ({ codigo: a.codigo, descricao: a.descricao, peso: a.peso })), palavras: P.palavras, filtros: P.filtros,
         } } });
         await carregarPerfis(true);
-        const r = await api('/api/listas', { method: 'POST', corpo: { uf: P.cidade.uf, cidade: P.cidade.nome, perfil: perfil.id } });
+        const onde = P.onde === 'cidade' ? { uf: P.cidade.uf, cidade: P.cidade.nome } : { uf: P.onde === 'estado' ? P.uf : '' };
+        const r = await api('/api/listas', { method: 'POST', corpo: { ...onde, perfil: perfil.id } });
         m.fechar();
         location.hash = `#/lista/${encodeURIComponent(r.id)}`;
       } catch (e) { erro.textContent = e.message; gerar.disabled = false; gerar.replaceChildren('Salvar perfil e gerar lista'); }
@@ -195,4 +224,45 @@ function folhaProposta(buscaId, texto) {
     rodape.replaceChildren(h('span', { class: 'custo-busca', text: custo ? `Esta busca custou ${usd(custo)}` : '' }), erro, gerar);
     rodape.classList.add('rodape-proposta');
   }
+}
+
+/* gerar um perfil salvo num estado inteiro ou no Brasil todo (o caminho da cidade fica no Início) */
+function folhaRegiao(perfil) {
+  const idT = uid('folha');
+  const r = perfil.receita || {}, f = r.filtros || {};
+  const codigos = (r.atividades || []).map((a) => a.codigo);
+  let uf = '', pedido = 0;
+  const total = h('div', { class: 'prev-total', 'aria-live': 'polite' }, esqueleto('60%', '20px'));
+  const erro = h('p', { class: 'erro-inline', role: 'alert' });
+  const gerar = h('button', { class: 'btn btn-prim btn-grande', type: 'button', disabled: !codigos.length }, 'Gerar lista');
+  async function contar() {
+    const meu = ++pedido;
+    if (!codigos.length) { total.replaceChildren(h('span', { text: 'Este perfil não tem atividades. Ele só gera listas de uma cidade.' })); return; }
+    total.replaceChildren(esqueleto('60%', '20px'));
+    try {
+      const c = await api('/api/perfis/contar', { method: 'POST', corpo: { cidade: '', uf, codigos, so_ativas: f.so_ativas !== false, incluir_mei: !!f.incluir_mei, idade_min: f.idade_min || 0, portes: f.portes || [] } });
+      if (meu !== pedido) return;
+      total.replaceChildren(h('strong', { text: num(c.total) }), h('span', { text: `${c.total === 1 ? 'empresa' : 'empresas'} ${uf ? 'em ' + uf : 'no Brasil'}` }));
+    } catch (e) { if (meu === pedido) total.replaceChildren(h('span', { text: e.message })); }
+  }
+  const sel = seletorUF({ valor: '', brasil: true, aoMudar: (v) => { uf = v; erro.textContent = ''; contar(); } });
+  gerar.addEventListener('click', async () => {
+    erro.textContent = ''; gerar.disabled = true; gerar.replaceChildren(h('i', { class: 'giro', 'aria-hidden': 'true' }), 'Enviando…');
+    try {
+      const l = await api('/api/listas', { method: 'POST', corpo: { uf, perfil: perfil.id } });
+      m.fechar();
+      location.hash = `#/lista/${encodeURIComponent(l.id)}`;
+    } catch (e) { erro.textContent = e.message; gerar.disabled = false; gerar.replaceChildren('Gerar lista'); }
+  });
+  const painel = h('div', { class: 'folha', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': idT, tabindex: '-1' },
+    h('header', { class: 'folha-cab' },
+      h('div', {}, h('h2', { id: idT, text: 'Lista num estado ou no Brasil' }), h('p', { class: 'apoio', text: `Perfil: ${perfil.nome}` })),
+      h('button', { class: 'btn-icone', type: 'button', 'aria-label': 'Fechar', onclick: () => m.fechar() }, icone('x', 20))),
+    h('div', { class: 'folha-corpo' },
+      h('section', { class: 'folha-sec' }, h('h3', { text: 'Onde procurar' }),
+        h('div', { class: 'campo' }, h('label', { for: sel.id, text: 'Região' }), sel), total,
+        h('p', { class: 'dica', text: 'Entram as empresas das atividades do perfil em todas as cidades, com os filtros dele. Listas acima de 300 mil empresas são recusadas: aí escolha um estado.' }))),
+    h('footer', { class: 'folha-rodape' }, erro, gerar));
+  const m = abrirModal(painel);
+  contar();
 }

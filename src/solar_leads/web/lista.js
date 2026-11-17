@@ -123,7 +123,7 @@ async function gerarDeNovo(meta) {
   if (!ok) return;
   const p = meta.parametros || {};
   try {
-    const r = await api('/api/listas', { method: 'POST', corpo: { uf: meta.uf, ...(meta.publico ? { publico: meta.publico } : {}), ...(listaPorNome(meta) ? { palavras: meta.palavras } : { cidade: meta.cidade }), cnaes: (meta.atividades || []).map((a) => a.codigo), so_ativas: !!p.so_ativas, incluir_mei: !!p.incluir_mei, so_locais: p.so_locais !== false, validar_whatsapp: !!p.validar_whatsapp } });
+    const r = await api('/api/listas', { method: 'POST', corpo: { uf: meta.uf, ...(meta.publico ? { publico: meta.publico } : {}), ...(listaPorNome(meta) ? { palavras: meta.palavras } : listaRegiao(meta) ? {} : { cidade: meta.cidade }), cnaes: (meta.atividades || []).map((a) => a.codigo), so_ativas: !!p.so_ativas, incluir_mei: !!p.incluir_mei, so_locais: p.so_locais !== false, validar_whatsapp: !!p.validar_whatsapp } });
     location.hash = `#/lista/${encodeURIComponent(r.id)}`;
   } catch (e) { avisar(e.message, 'erro'); }
 }
@@ -398,9 +398,9 @@ async function montarLista(raiz, meta, abaInicial, qs) {
   /* --- mestre-detalhe (componente compartilhado com as pastas) --- */
   const resultado = h('p', { class: 'resultado', 'aria-live': 'polite' });
   const md = criarMestreDetalhe({
-    local: listaPorNome(meta), publico: meta.publico,
+    local: listaAmpla(meta), publico: meta.publico,
     url: (pagina) => `/api/listas/${idUrl}/contatos?${queryDosFiltros(L.f, { ordem: L.ordem, pagina, por_pagina: 50 })}`,
-    perfil: { local: listaPorNome(meta), aoAdicionarPasta: (l, ctx) => { if (ctx && ctx.fechar) ctx.fechar(); abrirAdicionar({ telefones: [l.telefone] }); } },
+    perfil: { local: listaAmpla(meta), aoAdicionarPasta: (l, ctx) => { if (ctx && ctx.fechar) ctx.fechar(); abrirAdicionar({ telefones: [l.telefone] }); } },
     vazio: () => estadoVazio('Nenhum contato com esses filtros', 'Afrouxe algum filtro para ver mais contatos.', h('button', { class: 'btn btn-sec', type: 'button', onclick: limparTudo }, 'Limpar filtros')),
     aoMudar: () => { desenharNumeros(); atualizarExportar(); },
     aoCarregar: (res) => { resultado.textContent = res.total ? `${num(res.total)} contatos` : ''; },

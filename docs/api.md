@@ -86,6 +86,16 @@ Por cidade:
     curl -X POST https://SEU-ENDERECO/api/v1/listas -H "Authorization: Bearer $CHAVE" \
       -H "Content-Type: application/json" -d '{"uf": "MG", "cidade": "Montes Claros"}'
 
+Por atividade num estado inteiro (só `uf`) ou no Brasil todo (nem `cidade` nem `uf`). As atividades
+vêm de `cnaes` ou do perfil; sem nenhuma, a resposta é `400`. Acima de 300.000 empresas com os filtros,
+a resposta também é `400`, na hora: escolha um estado, tire o MEI ou use menos atividades.
+
+    -d '{"uf": "MG", "perfil": "3"}'
+    -d '{"perfil": "3"}'
+    -d '{"cnaes": ["8630504"], "idade_min": 5}'
+
+Cada contato traz a `cidade` e a `uf` da própria empresa. "Só locais" passa a valer por estado.
+
 Por nome da empresa, num estado ou no Brasil (`uf` vazio):
 
     -d '{"palavras": ["solar", "fotovolt"], "uf": "", "cnaes": ["4321500"], "so_ativas": true, "publico": "empresa"}'
@@ -132,3 +142,31 @@ consultado gasta 1 consulta do pacote, tenha WhatsApp ou não; quem já foi veri
 dias não gasta de novo. Ao terminar, a lista é refeita sozinha com os resultados: quem tem WhatsApp
 confirmado sobe, e os filtros `tipo_whatsapp=pessoal` e `tipo_whatsapp=business` passam a valer.
 
+## Servidor MCP (para agentes de IA)
+
+O Garimpo também é um servidor MCP: Claude e outros agentes de IA usam o sistema por ferramentas.
+
+- **Endereço:** `https://SEU-ENDERECO/mcp` (transporte HTTP do MCP, sem estado, respostas JSON)
+- **Chave:** a mesma de `/api/v1`, no cabeçalho `Authorization: Bearer SUA_CHAVE`. Mesmo limite de 300 chamadas por minuto.
+- **Claude Code:** `claude mcp add --transport http garimpo https://SEU-ENDERECO/mcp --header "Authorization: Bearer SUA_CHAVE"`
+
+| Ferramenta | Para quê |
+|---|---|
+| `situacao_da_base` | Mês da base da Receita, ANEEL, WhatsApp verificados |
+| `buscar_cidades`, `buscar_atividades` | Achar município e atividade (CNAE) |
+| `contar_empresas` | Quantas empresas por atividade numa cidade, num estado ou no Brasil, com filtros |
+| `montar_busca_com_ia` | A IA monta a proposta de busca a partir de uma descrição (cerca de 1 minuto, uns US$ 0,05) |
+| `ver_busca_com_ia` | Andamento da busca com IA, se ela passar de 100 segundos |
+| `salvar_perfil_da_busca` | Guarda a proposta como perfil e devolve o lugar sugerido |
+| `listar_perfis`, `ver_perfil` | Perfis prontos e salvos |
+| `criar_lista` | Gera a lista: cidade, estado, Brasil ou palavras no nome |
+| `ver_lista`, `listar_listas` | Status e resumo |
+| `contatos_da_lista` | Contatos, com filtros, ordem e paginação (até 100 por página) |
+| `retirar_contatos` | Próximos contatos fora de pastas, já guardados numa pasta |
+| `avaliar_lista_com_ia`, `ver_avaliacao` | Nota de 0 a 10 da IA para cada empresa (gasta créditos de IA) |
+| `uso_da_ia` | Gasto de IA do mês e teto |
+| `listar_pastas`, `contatos_da_pasta` | Pastas e seus contatos |
+
+Ficam de fora de propósito: apagar qualquer coisa, verificar WhatsApp (gasta o saldo pago da CheckLeaked)
+e baixar PDF ou CSV (use `/api/v1` para arquivos). Um erro volta como resultado de ferramenta com a
+mensagem do sistema, para o agente entender e corrigir o pedido.

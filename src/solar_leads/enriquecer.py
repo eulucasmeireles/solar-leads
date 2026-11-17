@@ -165,13 +165,7 @@ def carregar_por_nome(con: duckdb.DuckDBPyConnection, palavras: list[str], uf: s
         params.append(uf.upper())
     if so_ativas:
         filtro += " AND e.situacao = '02'"
-    # Nome do município com acento, quando a tabela de apoio da página já existe.
-    apoio = config.DADOS / "municipios_uf.parquet"
-    if apoio.exists():
-        cidade = "coalesce(x.exibicao, m.descricao)"
-        juncao = f"LEFT JOIN read_parquet('{apoio}') x ON x.uf = e.uf AND x.codigo = e.municipio"
-    else:
-        cidade, juncao = "m.descricao", ""
+    cidade, juncao = _apoio_de_cidade()
     con.execute(
         f"""
         CREATE OR REPLACE TEMP TABLE estab_nome AS
@@ -188,7 +182,82 @@ def carregar_por_nome(con: duckdb.DuckDBPyConnection, palavras: list[str], uf: s
             f"{n:,} empresas têm essas palavras no nome".replace(",", ".")
             + ": é muito para uma lista só. Use palavras mais específicas ou escolha um estado."
         )
-    # Quantas empresas ativas dividem o endereço, contando todas as da base e não só as achadas pelo nome.
+    _com_endereco(con, uf)
+    return n
+
+
+def _apoio_de_cidade() -> tuple[str, str]:
+    """Nome do município com acento, quando a tabela de apoio da página já existe."""
+    apoio = config.DADOS / "municipios_uf.parquet"
+    if apoio.exists():
+        return "coalesce(x.exibicao, m.descricao)", f"LEFT JOIN read_parquet('{apoio}') x ON x.uf = e.uf AND x.codigo = e.municipio"
+    return "m.descricao", ""
+
+
+def data_limite(anos: int) -> str:
+    """Data de abertura (AAAAMMDD) de quem tem pelo menos `anos` de empresa hoje."""
+    hoje = date.today()
+    try:
+        return hoje.replace(year=hoje.year - anos).strftime("%Y%m%d")
+    except ValueError:  # 29 de fevereiro
+        return hoje.replace(year=hoje.year - anos, day=28).strftime("%Y%m%d")
+
+
+def carregar_regiao(
+    con: duckdb.DuckDBPyConnection, cnaes: list[str], uf: str = "", *, so_ativas: bool = False,
+    incluir_mei: bool = False, idade_min: int = 0, portes: list[str] | None = None,
+) -> int:
+    """Materializa em `estab_mun` os estabelecimentos de um estado (ou do país, sem `uf`) com uma das
+    atividades. Os filtros do perfil já entram aqui, para a lista não carregar o que vai descartar.
+
+    Como na busca por nome, cada linha traz `uf` e `cidade`. Devolve quantos são.
+    """
+    if not cnpj_db.tem_tabela(con, "estab_cidade"):
+        raise RuntimeError("A lista por estado usa a tabela nacional: rode `leads base cidades` antes.")
+    codigos = sorted({"".join(c for c in x if c.isdigit()) for x in cnaes} - {""})
+    if not codigos:
+        raise ValueError("Escolha ao menos uma atividade para gerar a lista do estado ou do Brasil.")
+    cond = ["(" + " OR ".join("e.cnae_fiscal LIKE ?" for _ in codigos) + ")", "coalesce(e.natureza_juridica, '') NOT LIKE '1%'"]
+    params: list = [c + "%" for c in codigos]
+    if uf:
+        cond.append("e.uf = ?")
+        params.append(uf.upper())
+    if so_ativas:
+        cond.append("e.situacao = '02'")
+    if not incluir_mei:
+        cond.append("NOT coalesce(e.mei, false)")
+    if idade_min:
+        cond.append("e.data_inicio_atividade <= ?")
+        params.append(data_limite(int(idade_min)))
+    portes = [p for p in portes or [] if p in ("01", "03", "05")]
+    if portes:
+        cond.append("trim(e.porte) IN (SELECT unnest(?))")
+        params.append(portes)
+    cidade, juncao = _apoio_de_cidade()
+    con.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE estab_nome AS
+        SELECT e.* EXCLUDE (municipio), {cidade} AS cidade
+        FROM estab_cidade e LEFT JOIN municipios m ON m.codigo = e.municipio {juncao}
+        WHERE {' AND '.join(cond)}
+        """,
+        params,
+    )
+    n = con.execute("SELECT count(*) FROM estab_nome").fetchone()[0]
+    if n > MAX_EMPRESAS_POR_NOME:
+        con.execute("DROP TABLE estab_nome")
+        raise ValueError(
+            f"{n:,} empresas {'em ' + uf.upper() if uf else 'no Brasil'} com essas atividades e filtros".replace(",", ".")
+            + f": é muito para uma lista só (até {MAX_EMPRESAS_POR_NOME:,}).".replace(",", ".")
+            + " Escolha um estado, tire o MEI ou use menos atividades."
+        )
+    _com_endereco(con, uf)
+    return n
+
+
+def _com_endereco(con: duckdb.DuckDBPyConnection, uf: str) -> None:
+    """De `estab_nome` para `estab_mun`, com quantas empresas ativas dividem o endereço."""
+    # Quantas empresas ativas dividem o endereço, contando todas as da base e não só as achadas.
     con.execute(
         f"""
         CREATE OR REPLACE TEMP TABLE estab_mun AS
@@ -205,7 +274,6 @@ def carregar_por_nome(con: duckdb.DuckDBPyConnection, palavras: list[str], uf: s
         [uf.upper()] if uf else [],
     )
     con.execute("DROP TABLE estab_nome")
-    return n
 
 
 _COLS = (
@@ -506,6 +574,8 @@ def enriquecer(
     palavras: list[str] | None = None,
     progresso=None,
     solar: bool = True,
+    idade_min: int = 0,
+    portes: list[str] | None = None,
 ) -> list[dict]:
     """Leads dos lugares do Maps e, com `cnaes`, também de todo estabelecimento do
     município com essa atividade na Receita (ativo ou não) que o Maps não trouxe.
@@ -515,13 +585,19 @@ def enriquecer(
     cidade e o estado da própria empresa. "Só locais" passa a valer por estado: sede da
     empresa dentro do recorte e telefone com DDD do estado dela.
 
+    Sem `palavras` e sem `codigo_municipio`, o recorte são as empresas com as atividades `cnaes`
+    no estado `uf` (ou no país); `idade_min` e `portes` já filtram na carga.
+
     `solar=False` (listas de outros nichos) pula a consulta à ANEEL: as colunas de solar ficam vazias.
     """
     etapa = progresso or (lambda texto: None)
-    amplo = bool(palavras)
-    if amplo:
+    amplo = bool(palavras) or not codigo_municipio
+    if palavras:
         etapa("Procurando as empresas pelo nome")
         carregar_por_nome(con, palavras, uf, so_ativas)
+    elif amplo:
+        etapa(f"Carregando as empresas {'de ' + uf.upper() if uf else 'do Brasil'}")
+        carregar_regiao(con, cnaes or [], uf, so_ativas=so_ativas, incluir_mei=incluir_mei, idade_min=idade_min, portes=portes)
     else:
         etapa("Carregando as empresas da cidade")
         carregar_municipio(con, codigo_municipio, uf, so_ativas)

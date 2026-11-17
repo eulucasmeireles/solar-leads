@@ -324,6 +324,21 @@ function blocoChaves() {
     return det;
   }
 
+  function comoUsarMcp() {
+    const det = h('details', { class: 'api-como' }, h('summary', { text: 'Conectar por MCP (Claude e outros agentes de IA)' }));
+    const urlMcp = origem + '/mcp';
+    const json = JSON.stringify({ mcpServers: { garimpo: { type: 'http', url: urlMcp, headers: { Authorization: 'Bearer SUA_CHAVE' } } } }, null, 2);
+    det.append(h('div', { class: 'api-corpo' },
+      h('p', { text: 'Agentes de IA usam o Garimpo por ferramentas: montar a busca com IA, gerar listas (cidade, estado ou Brasil), ler e retirar contatos, avaliar com IA. Nenhuma ferramenta apaga nada nem gasta o saldo de WhatsApp.' }),
+      h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'Endereço do MCP' }), bloco(urlMcp, 'Endereço do MCP')),
+      h('p', {}, 'Use uma chave desta página, no cabeçalho ', h('code', { text: 'Authorization: Bearer SUA_CHAVE' }), '.'),
+      h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'No Claude Code' }),
+        bloco(`claude mcp add --transport http garimpo ${urlMcp} \\\n  --header "Authorization: Bearer SUA_CHAVE"`, 'Comando do Claude Code')),
+      h('div', { class: 'campo' }, h('span', { class: 'api-rot', text: 'Em outros clientes (arquivo de configuração)' }), bloco(json, 'Configuração do MCP')),
+      h('p', { class: 'dica', text: 'As ferramentas de IA gastam créditos da Anthropic dentro do teto do mês. Mesmo limite da API: 300 chamadas por minuto por chave.' })));
+    return det;
+  }
+
   function desenhar() {
     let linhas;
     if (S.erro) linhas = [h('div', { class: 'ajuste' }, h('div', { class: 'ajuste-tx' }, h('div', { class: 'ajuste-d', text: S.erro }), h('button', { class: 'btn btn-sec btn-pequeno', type: 'button', onclick: carregar }, 'Tentar de novo')))];
@@ -340,18 +355,19 @@ function blocoChaves() {
     }
     zona.replaceChildren(h('section', { class: 'ajustes' }, h('h2', { class: 'ajustes-tit', text: 'Chaves de API' }),
       h('div', { class: 'cartao cartao-ajustes' },
-        h('div', { class: 'ajuste' }, h('p', { class: 'ajuste-d', text: 'Para suas automações (n8n, GHL) lerem listas e retirarem contatos sem usar a senha do sistema.' })),
+        h('div', { class: 'ajuste' }, h('p', { class: 'ajuste-d', text: 'Para suas automações (n8n, GHL) e agentes de IA (MCP) lerem listas e retirarem contatos sem usar a senha do sistema.' })),
         linhas,
         h('div', { class: 'ajuste' }, h('button', { class: 'btn btn-prim', type: 'button', disabled: !S.chaves, onclick: dialogoCriar }, 'Criar chave')),
-        h('div', { class: 'ajuste ajuste-bloco' }, comoUsar()))));
+        h('div', { class: 'ajuste ajuste-bloco' }, comoUsar()),
+        h('div', { class: 'ajuste ajuste-bloco' }, comoUsarMcp()))));
   }
 
   async function carregar() {
     try { S.chaves = await api('/api/chaves'); S.erro = ''; }
     catch (e) { S.erro = e.status === 404 ? 'As chaves de API ainda não estão disponíveis neste servidor.' : e.message; }
-    const aberto = zona.querySelector('details.api-como[open]');
+    const abertos = [...zona.querySelectorAll('details.api-como')].map((d) => d.open);
     desenhar();
-    if (aberto) { const d = zona.querySelector('details.api-como'); if (d) d.open = true; }
+    zona.querySelectorAll('details.api-como').forEach((d, i) => { if (abertos[i]) d.open = true; });
   }
   desenhar();
   carregar();

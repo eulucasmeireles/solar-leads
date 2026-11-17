@@ -300,7 +300,7 @@ function cartaoPerfil(p, { aoUsar, aoExcluir }) {
     h('header', { class: 'cl-topo' }, h('h3', {}, usar), menu),
     h('p', { class: 'cl-ativ', text: r.oferta || r.cliente_ideal || 'Perfil sem descrição' }),
     h('footer', { class: 'cl-rodape' }, h('span', { class: 'cl-sub', text: n ? `${num(n)} ${n === 1 ? 'atividade' : 'atividades'}` : 'Todas as atividades' }),
-      h('span', { class: 'link-seta' }, 'Gerar em outra cidade', icone('direita', 14))));
+      h('span', { class: 'link-seta' }, 'Gerar em outro lugar', icone('direita', 14))));
 }
 
 async function excluirPerfil(p, depois) {
@@ -322,8 +322,9 @@ function telaInicio(raiz) {
   function escolherPerfil(p) {
     perfilDaCidade = p;
     avisoPerfil.hidden = !p;
-    avisoPerfil.replaceChildren(...(p ? [chip(`Perfil: ${p.nome}`, () => escolherPerfil(null), 'Tirar o perfil escolhido')] : []));
-    if (p) { modos.definir('cidade'); mudarModo('cidade'); combo.input.focus(); combo.input.scrollIntoView({ block: 'center', behavior: 'smooth' }); avisar(`Escolha a cidade para o perfil “${p.nome}”.`); }
+    avisoPerfil.replaceChildren(...(p ? [chip(`Perfil: ${p.nome}`, () => escolherPerfil(null), 'Tirar o perfil escolhido'),
+      (p.receita && (p.receita.atividades || []).length) ? h('button', { class: 'link-btn', type: 'button', onclick: () => folhaRegiao(p) }, 'Ou gere num estado ou no Brasil todo') : null] : []));
+    if (p) { modos.definir('cidade'); mudarModo('cidade'); combo.input.focus(); combo.input.scrollIntoView({ block: 'center', behavior: 'smooth' }); avisar(`Escolha a cidade para o perfil “${p.nome}”, ou gere num estado ou no Brasil todo.`); }
   }
   const combo = criarCombo({
     rotulo: 'Cidade', placeholder: 'Buscar cidade…', minimo: 2, grande: true, vazio: 'Nenhuma cidade encontrada.',

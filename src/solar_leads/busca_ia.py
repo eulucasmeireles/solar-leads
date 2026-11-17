@@ -16,6 +16,7 @@ from datetime import date
 import duckdb
 
 from . import cnpj_db, config, ia, perfis
+from .enriquecer import data_limite
 
 MAX_VOLTAS = 14
 MUNICIPIOS = config.DADOS / "municipios_uf.parquet"
@@ -26,7 +27,9 @@ município, data de abertura, porte (01 micro, 03 pequeno, 05 médio ou grande),
 Depois de pronto, o perfil gera uma lista com os donos dessas empresas e o telefone deles.
 
 A pessoa vai descrever o que vende e quem quer encontrar. Sua tarefa:
-1. Se ela citou uma cidade, ache-a com `achar_cidade`. Sem cidade, trabalhe sem ela (cidade nula).
+1. Se ela citou uma cidade, ache-a com `achar_cidade`. Se citou só um estado, use a UF e deixe a
+   cidade vazia. Se pediu o Brasil todo ou não citou lugar, deixe cidade e UF vazias: a lista pode
+   ser de uma cidade, de um estado inteiro ou do país.
 2. Ache as atividades (CNAE) em que o cliente ideal está, com `buscar_atividades`. Procure por vários
    termos: o nome do ramo, sinônimos e ramos vizinhos que também compram. Use só códigos que as
    ferramentas devolveram.
@@ -107,9 +110,8 @@ def _onde(cidade_uf: tuple[str, str] | None, so_ativas: bool, incluir_mei: bool,
     if not incluir_mei:
         cond.append("NOT coalesce(mei, false)")
     if idade_min:
-        limite = date.today().replace(year=date.today().year - int(idade_min)).strftime("%Y%m%d")
         cond.append("data_inicio_atividade <= ?")
-        params.append(limite)
+        params.append(data_limite(int(idade_min)))
     portes = [p for p in portes if p in perfis.PORTES]
     if portes:
         cond.append("trim(porte) IN (SELECT unnest(?))")
@@ -215,7 +217,7 @@ FERRAMENTAS = [
          "cliente_ideal": {"type": "string", "description": "Quem é o cliente ideal, numa ou duas frases"},
          "criterio_ia": {"type": "string"}, "explicacao": {"type": "string"},
          "cidade": {"type": "string", "description": "Cidade achada com achar_cidade, ou vazio"},
-         "uf": {"type": "string", "description": "UF da cidade, ou vazio"},
+         "uf": {"type": "string", "description": "UF da cidade ou do estado pedido; vazio para o Brasil todo"},
          "atividades": {"type": "array", "items": _obj({
              "codigo": {"type": "string"}, "peso": {"type": "integer", "enum": [1, 2, 3]},
              "motivo": {"type": "string", "description": "Por que esta atividade, em poucas palavras"}})},
@@ -332,8 +334,12 @@ def conferir(con: duckdb.DuckDBPyConnection, proposta: dict) -> dict:
     }
     cidade, uf = _texto(proposta.get("cidade")), _texto(proposta.get("uf")).upper()
     achada = _codigo_municipio(con, cidade, uf) if cidade and uf else None
+    if not achada and (len(uf) != 2 or MUNICIPIOS.exists() and not con.execute(
+        f"SELECT 1 FROM read_parquet('{MUNICIPIOS}') WHERE uf = ? LIMIT 1", [uf]
+    ).fetchone()):
+        uf = ""  # sem cidade achada vale o estado, se for um estado de verdade; senão, o Brasil
     contagem = contar_empresas(
-        con, cidade=cidade if achada else "", uf=uf if achada else "", codigos=list(descricoes),
+        con, cidade=cidade if achada else "", uf=uf, codigos=list(descricoes),
         so_ativas=filtros["so_ativas"], incluir_mei=filtros["incluir_mei"], idade_min=filtros["idade_min"], portes=filtros["portes"],
     ) if descricoes else {"total": 0, "por_atividade": []}
     por_codigo = {p["codigo"]: p["empresas"] for p in contagem.get("por_atividade", [])}
@@ -355,6 +361,7 @@ def conferir(con: duckdb.DuckDBPyConnection, proposta: dict) -> dict:
         "criterio_ia": str(proposta.get("criterio_ia") or "").strip()[:2000],
         "explicacao": str(proposta.get("explicacao") or "").strip()[:2000],
         "cidade": {"nome": achada[1].title(), "uf": uf, "empresas": empresas_cidade} if achada else None,
+        "uf": uf,
         "atividades": atividades,
         "palavras": [p for p in (_texto(x).upper() for x in proposta.get("palavras") or []) if len(p) >= 3][:10],
         "filtros": filtros,

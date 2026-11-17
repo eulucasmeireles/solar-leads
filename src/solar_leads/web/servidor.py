@@ -13,6 +13,7 @@ import io
 import json
 import os
 import queue
+import sys
 import threading
 import time
 from datetime import datetime
@@ -27,6 +28,7 @@ from pydantic import BaseModel
 
 from .. import aneel, avaliacao_ia, busca_ia, chaves, cnpj_db, config, consulta, enriquecer, ia, pastas, perfis, pipeline, relatorio, whatsapp
 from ..telefone import e164, normalizar, so_digitos
+from . import mcp_garimpo
 
 AQUI = Path(__file__).parent
 LISTAS = config.DADOS / "listas"
@@ -184,9 +186,10 @@ async def exigir_sessao(request: Request, call_next):
         return JSONResponse({"detail": "Endereço inválido."}, status_code=404)
     fonte = caminho.startswith("/static/fonts/") and caminho.endswith(".woff2") and caminho.count("/") == 3
     livre = caminho in ("/login", "/api/login", "/api/sessao") or fonte
-    # A API das automações (/api/v1) aceita uma chave no lugar da sessão. A chave não abre mais nada:
-    # nem a página, nem as rotas internas, nem a criação de outras chaves.
-    if SENHA_HASH and caminho.startswith("/api/v1/") and not _sessao_valida(request.cookies.get(COOKIE)):
+    # A API das automações (/api/v1) e o servidor MCP (/mcp) aceitam uma chave no lugar da sessão.
+    # A chave não abre mais nada: nem a página, nem as rotas internas, nem a criação de outras chaves.
+    automacao = caminho.startswith("/api/v1/") or caminho == mcp_garimpo.CAMINHO
+    if SENHA_HASH and automacao and not _sessao_valida(request.cookies.get(COOKIE)):
         recusa = _conferir_chave(request)
         if recusa is not None:
             return recusa
@@ -615,8 +618,9 @@ def parar_verificacao() -> dict:
 Lista = Annotated[list[str] | None, Query()]
 
 class NovaLista(BaseModel):
-    """Lista de uma cidade (`uf` + `cidade`) ou, com `palavras`, das empresas de um estado
-    (ou do país, sem `uf`) que têm uma dessas palavras no nome."""
+    """Lista de uma cidade (`uf` + `cidade`); com `palavras`, das empresas de um estado (ou do país,
+    sem `uf`) que têm uma dessas palavras no nome; sem cidade e sem palavras, das empresas com as
+    atividades (`cnaes` ou as do perfil) no estado `uf` ou, sem `uf`, no Brasil todo."""
 
     uf: str = ""
     cidade: str = ""
@@ -644,6 +648,11 @@ def _com_perfil(meta: dict) -> dict:
     return {**meta, "publico": _publico(meta), "perfil": perfis.do_meta(meta)}
 
 
+def _amplo(meta: dict) -> bool:
+    """Lista de vários municípios: por nome da empresa, ou por atividade num estado ou no Brasil."""
+    return bool(meta.get("palavras")) or bool(meta.get("regiao"))
+
+
 def _contar_para_o_cartao(meta: dict) -> None:
     """Os números do cartão saem da mesma consulta que a tela usa, para os dois baterem."""
     cte, params = _consulta(LISTAS / f"{meta['id']}.parquet", {}, {}, 0, 1, "")
@@ -659,8 +668,8 @@ VERIFICAR_AO_GERAR = 500  # "Verificar WhatsApp ao gerar" confere só os primeir
 
 
 def _codigo_do_municipio(meta: dict) -> str:
-    """Código do município da lista (as listas antigas não o guardaram); vazio nas listas por nome."""
-    if meta.get("palavras"):
+    """Código do município da lista (as listas antigas não o guardaram); vazio nas listas de vários municípios."""
+    if _amplo(meta):
         return ""
     if meta.get("codigo"):
         return meta["codigo"]
@@ -692,7 +701,7 @@ def _gerar(meta: dict, codigo: str, refazer: bool = False) -> None:
     try:
         meta["status"] = "gerando"
         p = meta["parametros"]
-        amplo = bool(meta.get("palavras"))  # lista por nome da empresa, num estado ou no país
+        amplo = _amplo(meta)  # lista por nome da empresa ou por atividade, num estado ou no país
         perfil = perfis.do_meta(meta)
         con = cnpj_db.conectar()
         try:
@@ -701,6 +710,7 @@ def _gerar(meta: dict, codigo: str, refazer: bool = False) -> None:
                 cnaes=[a["codigo"] for a in meta["atividades"]] or [""],
                 so_ativas=p["so_ativas"], incluir_mei=p["incluir_mei"], so_locais=p.get("so_locais", True),
                 palavras=meta.get("palavras") or None, progresso=etapa, solar=_publico(meta) == "dono",
+                idade_min=p.get("idade_min", 0), portes=p.get("portes", []),
             )
             etapa("Aproveitando os WhatsApp já verificados")
             # Sempre aproveita o que já foi verificado; consulta o resto só quando pedido.
@@ -746,7 +756,7 @@ def _gerar_de_novo(meta: dict, codigo: str) -> None:
     try:
         meta = _ler_meta(id_)
         p = meta["parametros"]
-        amplo = bool(meta.get("palavras"))
+        amplo = _amplo(meta)
         perfil = perfis.do_meta(meta)
         con = cnpj_db.conectar()
         try:
@@ -756,6 +766,7 @@ def _gerar_de_novo(meta: dict, codigo: str) -> None:
                 so_ativas=p["so_ativas"], incluir_mei=p["incluir_mei"], so_locais=p.get("so_locais", True),
                 palavras=meta.get("palavras") or None, solar=_publico(meta) == "dono",
                 progresso=lambda texto: _mexer_meta(id_, atualizando=texto),
+                idade_min=p.get("idade_min", 0), portes=p.get("portes", []),
             )
             celulares = [t["tel"] for l in leads for t in l["telefones"] if t["faixa"] != "C"]
             tem_whatsapp = whatsapp.do_cache(con, celulares)
@@ -832,9 +843,12 @@ def _uf_valida(uf: str) -> str:
 
 
 def _rotulo(meta: dict) -> str:
-    """Nome curto da lista: "Montes Claros/MG" ou, na lista por nome, "Solar · Fotovolt (Brasil)"."""
+    """Nome curto da lista: "Montes Claros/MG"; na lista por nome, "Solar · Fotovolt (Brasil)";
+    na lista por atividade, "MG (estado todo)" ou "Brasil todo"."""
     if meta.get("palavras"):
         return f"{' · '.join(p.title() for p in meta['palavras'])} ({meta['uf'] or 'Brasil'})"
+    if meta.get("regiao"):
+        return f"{meta['uf']} (estado todo)" if meta["uf"] else "Brasil todo"
     return f"{meta['cidade'].title()}/{meta['uf']}"
 
 
@@ -892,6 +906,24 @@ def previa_do_publico(
     return _em_cache(f"publico:{'|'.join(palavras)}:{uf}:{so_ativas}:{incluir_mei}", 600, calcular)
 
 
+def _cabe_na_lista(uf: str, cnaes: list[str], so_ativas: bool, incluir_mei: bool, idade_min: int, portes: list[str]) -> None:
+    """Recusa na hora, e não depois de minutos na fila, a lista de estado ou do Brasil grande demais."""
+    con = cnpj_db.conectar(tentativas=2)
+    try:
+        n = busca_ia.contar_empresas(
+            con, uf=uf, codigos=cnaes, so_ativas=so_ativas, incluir_mei=incluir_mei, idade_min=idade_min, portes=portes
+        )["total"]
+    finally:
+        con.close()
+    if n > enriquecer.MAX_EMPRESAS_POR_NOME:
+        onde = f"em {uf}" if uf else "no Brasil"
+        raise HTTPException(
+            400,
+            f"São {n:,} empresas {onde} com essas atividades e filtros, mais que as {enriquecer.MAX_EMPRESAS_POR_NOME:,} de uma lista."
+            .replace(",", ".") + " Escolha um estado, tire o MEI ou use menos atividades.",
+        )
+
+
 @app.post("/api/listas")
 def criar_lista(pedido: NovaLista) -> dict:
     con = duckdb.connect()
@@ -921,10 +953,17 @@ def criar_lista(pedido: NovaLista) -> dict:
     so_locais = pedido.so_locais if "so_locais" in dito else f["so_locais"]
     portes = sorted({str(x).zfill(2) for x in (pedido.portes if "portes" in dito else f["portes"])} & set(perfis.PORTES))
     idade_min = max(0, min(50, pedido.idade_min if "idade_min" in dito else f["idade_min"]))
+    regiao = not palavras and not pedido.cidade.strip()
     if palavras:
         uf = _uf_valida(pedido.uf)
         # achado: (código do município, nome da lista, nº de empresas) — aqui não há município.
         achado = ("", " · ".join(palavras), 0)
+    elif regiao:
+        uf = _uf_valida(pedido.uf)
+        if not cnaes:
+            raise HTTPException(400, "Para gerar a lista de um estado ou do Brasil, escolha as atividades.")
+        _cabe_na_lista(uf, cnaes, so_ativas, incluir_mei, idade_min, portes)
+        achado = ("", uf or "Brasil", 0)
     else:
         uf = pedido.uf.upper()
         achado = con.execute(
@@ -960,6 +999,7 @@ def criar_lista(pedido: NovaLista) -> dict:
         "cidade": achado[1],
         "uf": uf,
         "palavras": palavras,
+        "regiao": regiao,
         "publico": publico,
         "perfil": perfis.retrato(perfil),
         "versao": pipeline.VERSAO,
@@ -1014,7 +1054,7 @@ def mudar_publico(id_: str, pedido: Publico) -> dict:
         if pedido.publico == "empresa" and not meta.get("perfil", {}).get("solar", True):
             perfil = meta["perfil"]
         pipeline.trocar_publico(
-            arquivo, "" if meta.get("palavras") else meta["cidade"], pedido.publico, perfis.pesos(perfil, meta.get("atividades"))
+            arquivo, "" if _amplo(meta) else meta["cidade"], pedido.publico, perfis.pesos(perfil, meta.get("atividades"))
         )
         meta.update(publico=pedido.publico, perfil=perfil)
         _contar_para_o_cartao(meta)
@@ -1587,6 +1627,8 @@ def pdf_da_lista(id_: str, f: Annotated[Filtros, Depends()], request: Request) -
     linhas = _linhas(con.execute(f"{cte} SELECT * EXCLUDE (dono_chave, ordem) FROM r ORDER BY {f.ordem}", params))
     if meta.get("palavras"):
         nome, regiao = " · ".join(p.title() for p in meta["palavras"]), meta["uf"] or "Brasil"
+    elif meta.get("regiao"):
+        nome, regiao = perfis.do_meta(meta)["nome"], meta["uf"] or "Brasil"
     else:
         nome, regiao = relatorio.titulo(meta["cidade"]), meta["uf"]
     pdf = relatorio.gerar_pdf(
@@ -2002,6 +2044,9 @@ _ROTAS_V1 = [
 ]
 for _metodo, _caminho, _funcao, _descricao in _ROTAS_V1:
     app.add_api_route(f"/api/v1{_caminho}", _funcao, methods=[_metodo], summary=_descricao)
+
+# O servidor MCP (/mcp): as mesmas funções da v1, como ferramentas para agentes de IA.
+mcp_garimpo.montar(app, sys.modules[__name__])
 
 
 @app.get("/")
